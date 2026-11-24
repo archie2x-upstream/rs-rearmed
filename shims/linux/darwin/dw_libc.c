@@ -258,7 +258,8 @@ int rc_host_select(int n, void *r, void *w, void *e, void *timeout) { return sel
 // <ctype.h>'s inline functions read _DefaultRuneLocale.__runetype[c] for c < 256 and call __maskrune,
 // __tolower and __toupper for the rest. The C locale: only ASCII has a class.
 struct dw_rune_locale dw__DefaultRuneLocale;
-int dw___mb_cur_max = 1;
+// MB_CUR_MAX is a call on Darwin: int ___mb_cur_max(void). The C locale, which is the one here: 1.
+int dw___mb_cur_max(void) { return 1; }
 
 __attribute__((constructor)) static void dw_ctype_init(void) {
   struct dw_rune_locale *l = &dw__DefaultRuneLocale;

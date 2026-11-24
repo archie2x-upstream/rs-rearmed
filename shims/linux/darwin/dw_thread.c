@@ -1,9 +1,11 @@
 // The Darwin layer: pthreads, Mach and POSIX semaphores, and the network the game is refused (dw.h).
 //
-// Darwin's pthread objects are at least as large as glibc's on AArch64 (mutex 64 >= 48, cond 48 >= 48,
-// attr 64 >= 64), so the host's object lives in the game's own storage. What differs is a statically
-// initialized one: Darwin's initializers put a signature in the first word, and glibc's are all zero,
-// so the signature is turned into the host's initial state the first time the object is used.
+// A mutex or a condition variable of the game's is not used as the host's object in place: the game
+// keeps some at addresses aligned for x86 only (a field of a packed structure), where the host's
+// atomic operations fault on AArch64. The game's storage holds a tag and a pointer to a host object
+// made for it instead. A statically initialized one has Darwin's signature in its first word; it gets
+// its host object the first time it is used. Attribute objects hold no atomics and are used in place
+// (Darwin's are at least as large as glibc's: attr 64 >= 64, mutexattr 16 >= 4, condattr 16 >= 4).
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
@@ -18,50 +20,81 @@
 
 #include "dw.h"
 
-_Static_assert(sizeof(pthread_mutex_t) <= DW_SIZEOF_PTHREAD_MUTEX, "host mutex fits in Darwin's");
-_Static_assert(sizeof(pthread_cond_t) <= DW_SIZEOF_PTHREAD_COND, "host cond fits in Darwin's");
+_Static_assert(DW_SIZEOF_PTHREAD_MUTEX >= 16 && DW_SIZEOF_PTHREAD_COND >= 16, "room for a tag and a pointer");
 _Static_assert(sizeof(pthread_attr_t) <= DW_SIZEOF_PTHREAD_ATTR, "host attr fits in Darwin's");
 _Static_assert(sizeof(pthread_mutexattr_t) <= DW_SIZEOF_PTHREAD_MUTEXATTR, "host mutexattr fits in Darwin's");
 _Static_assert(sizeof(pthread_condattr_t) <= DW_SIZEOF_PTHREAD_CONDATTR, "host condattr fits in Darwin's");
 
+#define TAG_MUTEX 0x21584554554d7764ull  // "dwMUTEX!"
+#define TAG_COND 0x21444e4f43647764ull   // "dwdCOND!"
+
 static pthread_mutex_t init_mu = PTHREAD_MUTEX_INITIALIZER;
 
-static pthread_mutex_t *mutex_of(void *m) {
-  uint64_t sig = __atomic_load_n((uint64_t *)m, __ATOMIC_ACQUIRE);
-  if (sig == DW_MUTEX_SIG_INIT || sig == DW_MUTEX_SIG_RECURSIVE || sig == DW_MUTEX_SIG_ERRORCHECK) {
-    pthread_mutex_lock(&init_mu);
-    sig = *(uint64_t *)m;
-    if (sig == DW_MUTEX_SIG_INIT || sig == DW_MUTEX_SIG_RECURSIVE || sig == DW_MUTEX_SIG_ERRORCHECK) {
-      pthread_mutexattr_t a;
-      pthread_mutexattr_init(&a);
-      pthread_mutexattr_settype(&a, sig == DW_MUTEX_SIG_RECURSIVE    ? PTHREAD_MUTEX_RECURSIVE
-                                    : sig == DW_MUTEX_SIG_ERRORCHECK ? PTHREAD_MUTEX_ERRORCHECK
-                                                                     : PTHREAD_MUTEX_NORMAL);
-      memset(m, 0, DW_SIZEOF_PTHREAD_MUTEX);
-      pthread_mutex_init(m, &a);
-      pthread_mutexattr_destroy(&a);
-    }
-    pthread_mutex_unlock(&init_mu);
+// The two words of the game's storage, read and written bytewise: the address may be unaligned.
+static uint64_t word(const void *p, int i) {
+  uint64_t v;
+  memcpy(&v, (const char *)p + 8 * i, 8);
+  return v;
+}
+static void set_word(void *p, int i, uint64_t v) { memcpy((char *)p + 8 * i, &v, 8); }
+
+static pthread_mutex_t *new_mutex(const pthread_mutexattr_t *attr, int type) {
+  pthread_mutex_t *h = malloc(sizeof *h);
+  if (!h) abort();
+  if (attr) pthread_mutex_init(h, attr);
+  else {
+    pthread_mutexattr_t a;
+    pthread_mutexattr_init(&a);
+    pthread_mutexattr_settype(&a, type);
+    pthread_mutex_init(h, &a);
+    pthread_mutexattr_destroy(&a);
   }
-  return m;
+  return h;
+}
+static pthread_mutex_t *mutex_of(void *m) {
+  if (word(m, 0) == TAG_MUTEX) return (pthread_mutex_t *)(uintptr_t)word(m, 1);
+  pthread_mutex_lock(&init_mu);
+  uint64_t sig = word(m, 0);
+  if (sig != TAG_MUTEX) {
+    // Darwin's static initializers, or storage never initialized (taken as a normal mutex)
+    int type = sig == DW_MUTEX_SIG_RECURSIVE ? PTHREAD_MUTEX_RECURSIVE
+               : sig == DW_MUTEX_SIG_ERRORCHECK ? PTHREAD_MUTEX_ERRORCHECK : PTHREAD_MUTEX_NORMAL;
+    set_word(m, 1, (uint64_t)(uintptr_t)new_mutex(0, type));
+    set_word(m, 0, TAG_MUTEX);
+  }
+  pthread_mutex_unlock(&init_mu);
+  return (pthread_mutex_t *)(uintptr_t)word(m, 1);
 }
 static pthread_cond_t *cond_of(void *c) {
-  if (__atomic_load_n((uint64_t *)c, __ATOMIC_ACQUIRE) == DW_COND_SIG_INIT) {
-    pthread_mutex_lock(&init_mu);
-    if (*(uint64_t *)c == DW_COND_SIG_INIT) {
-      memset(c, 0, DW_SIZEOF_PTHREAD_COND);
-      pthread_cond_init(c, 0);
-    }
-    pthread_mutex_unlock(&init_mu);
+  if (word(c, 0) == TAG_COND) return (pthread_cond_t *)(uintptr_t)word(c, 1);
+  pthread_mutex_lock(&init_mu);
+  if (word(c, 0) != TAG_COND) {
+    pthread_cond_t *h = malloc(sizeof *h);
+    if (!h) abort();
+    pthread_cond_init(h, 0);
+    set_word(c, 1, (uint64_t)(uintptr_t)h);
+    set_word(c, 0, TAG_COND);
   }
-  return c;
+  pthread_mutex_unlock(&init_mu);
+  return (pthread_cond_t *)(uintptr_t)word(c, 1);
 }
 
 int dw_pthread_mutex_init(void *m, const void *attr) {
-  memset(m, 0, DW_SIZEOF_PTHREAD_MUTEX);
-  return pthread_mutex_init(m, attr);
+  pthread_mutex_lock(&init_mu);
+  set_word(m, 1, (uint64_t)(uintptr_t)new_mutex(attr, PTHREAD_MUTEX_NORMAL));
+  set_word(m, 0, TAG_MUTEX);
+  pthread_mutex_unlock(&init_mu);
+  return 0;
 }
-int dw_pthread_mutex_destroy(void *m) { return pthread_mutex_destroy(mutex_of(m)); }
+int dw_pthread_mutex_destroy(void *m) {
+  if (word(m, 0) != TAG_MUTEX) return 0;  // a static one never used
+  pthread_mutex_t *h = (pthread_mutex_t *)(uintptr_t)word(m, 1);
+  int r = pthread_mutex_destroy(h);
+  if (r) return dw_errno_from_host(r);
+  set_word(m, 0, 0);
+  free(h);
+  return 0;
+}
 int dw_pthread_mutex_lock(void *m) { return pthread_mutex_lock(mutex_of(m)); }
 int dw_pthread_mutex_trylock(void *m) {
   int r = pthread_mutex_trylock(mutex_of(m));
@@ -80,10 +113,24 @@ int dw_pthread_mutexattr_settype(void *a, int type) {
 }
 
 int dw_pthread_cond_init(void *c, const void *attr) {
-  memset(c, 0, DW_SIZEOF_PTHREAD_COND);
-  return pthread_cond_init(c, attr);
+  pthread_cond_t *h = malloc(sizeof *h);
+  if (!h) abort();
+  pthread_cond_init(h, attr);
+  pthread_mutex_lock(&init_mu);
+  set_word(c, 1, (uint64_t)(uintptr_t)h);
+  set_word(c, 0, TAG_COND);
+  pthread_mutex_unlock(&init_mu);
+  return 0;
 }
-int dw_pthread_cond_destroy(void *c) { return pthread_cond_destroy(cond_of(c)); }
+int dw_pthread_cond_destroy(void *c) {
+  if (word(c, 0) != TAG_COND) return 0;
+  pthread_cond_t *h = (pthread_cond_t *)(uintptr_t)word(c, 1);
+  int r = pthread_cond_destroy(h);
+  if (r) return dw_errno_from_host(r);
+  set_word(c, 0, 0);
+  free(h);
+  return 0;
+}
 int dw_pthread_cond_signal(void *c) { return pthread_cond_signal(cond_of(c)); }
 int dw_pthread_cond_broadcast(void *c) { return pthread_cond_broadcast(cond_of(c)); }
 int dw_pthread_cond_wait(void *c, void *m) { return pthread_cond_wait(cond_of(c), mutex_of(m)); }

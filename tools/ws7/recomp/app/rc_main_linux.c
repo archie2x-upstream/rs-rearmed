@@ -7,6 +7,9 @@
 //                                        then RS_BOOT_FRAMES engine frames (default 0), drawn to an
 //                                        offscreen OpenGL context of RS_DISPLAY (WIDTHxHEIGHT, default
 //                                        1280x720); RS_BOOT_SHOT=FILE.ppm saves the last frame
+//                                        RS_BOOT_SHOT_EVERY=N saves every Nth frame beside it, numbered;
+//                                        RS_BOOT_KEYS="FRAME:KEY ..." presses keys at those frames (KEY:
+//                                        enter esc up down left right space tab back, or one character)
 //   rs-rearmed --window GAMEDIR IMAGE    the same start, in a full-screen window with the keyboard and
 //                                        the mouse, until the game ends or Ctrl+Q
 //
@@ -28,6 +31,42 @@ static double now_s(void) {
   struct timespec t;
   clock_gettime(CLOCK_MONOTONIC, &t);
   return (double)t.tv_sec + (double)t.tv_nsec * 1e-9;
+}
+
+// --boot's scripted keys (RS_BOOT_KEYS): the Mac virtual key code and character the shell would send.
+static int script_key(const char *name, int *code, int *ch) {
+  static const struct { const char *n; int code, ch; } named[] = {
+      {"enter", 36, 13}, {"esc", 53, 27}, {"space", 49, 32}, {"tab", 48, 9}, {"back", 51, 127},
+      {"up", 126, 0xF700}, {"down", 125, 0xF701}, {"left", 123, 0xF702}, {"right", 124, 0xF703}};
+  for (size_t i = 0; i < sizeof named / sizeof *named; i++)
+    if (!strcmp(named[i].n, name)) { *code = named[i].code; *ch = named[i].ch; return 1; }
+  static const char ansi[] = "asdfhgzxcv\0bqweryt123465=97-80]ou[ip\0lj'k;\\,/nm.";
+  if (name[0] && !name[1])
+    for (int i = 0; i < (int)sizeof ansi - 1; i++)
+      if (ansi[i] && ansi[i] == name[0]) { *code = i; *ch = name[0]; return 1; }
+  return 0;
+}
+static void script_keys(long frame) {
+  static const char *keys;
+  static int up_code = -1, up_ch;
+  if (up_code >= 0) {  // the key pressed on the frame before
+    rsp_post_input(RSP_EV_KEYUP, up_code, up_ch);
+    up_code = -1;
+  }
+  if (!keys) keys = getenv("RS_BOOT_KEYS") ? getenv("RS_BOOT_KEYS") : "";
+  for (const char *p = keys; *p;) {
+    char name[16];
+    long at;
+    int n = 0;
+    if (sscanf(p, " %ld:%15s%n", &at, name, &n) != 2) break;
+    int code, ch;
+    if (at == frame && script_key(name, &code, &ch)) {
+      rsp_post_input(RSP_EV_KEYDOWN, code, ch);
+      up_code = code;
+      up_ch = ch;
+    }
+    p += n;
+  }
 }
 
 int main(int argc, char **argv, char **envp) {
@@ -118,10 +157,18 @@ int main(int argc, char **argv, char **envp) {
     }
     const char *fe = getenv("RS_BOOT_FRAMES");
     long frames = fe && *fe ? atol(fe) : 0, f = 0;
-    const char *shot = getenv("RS_BOOT_SHOT");
+    const char *shot = getenv("RS_BOOT_SHOT"), *ee = getenv("RS_BOOT_SHOT_EVERY");
+    long every = ee && *ee ? atol(ee) : 0;
+    rsp_set_focus(1);  // input is only taken while the app has the focus
     for (; f < frames; f++) {
+      script_keys(f);
       if (rsp_game_frame()) break;
       if (have_gl && shot && *shot && f == frames - 1) host_gl_save_ppm(shot);
+      if (have_gl && shot && *shot && every > 0 && f % every == every - 1) {
+        char numbered[1100];
+        snprintf(numbered, sizeof numbered, "%s.%05ld.ppm", shot, f + 1);
+        host_gl_save_ppm(numbered);
+      }
       if (have_gl) host_gl_swap();
     }
     if (frames) printf("boot: %ld of %ld engine frames run in %.3f s\n", f, frames, now_s() - t3);
