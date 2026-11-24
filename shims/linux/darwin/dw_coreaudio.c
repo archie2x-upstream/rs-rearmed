@@ -4,9 +4,10 @@
 // device to 48 kHz, and is pulled by the unit's render callback. This file answers the property
 // questions that setup asks and runs that callback from a thread of its own.
 //
-// The device here is a clock with no sound: it pulls the engine at the device rate and drops the
-// samples, so the engine runs as it does with a real device. There are no inputs. A sound back end
-// takes the place of the clock (null_run); the property side stays.
+// Sound itself is the host's (host_audio_linux.h, when the program is linked with it): the output
+// device plays through it, and the guitar cable is an input device while one is plugged in. Without
+// the host's sound, or when its output does not open, the output device is a clock that pulls the
+// engine at the device rate and drops the samples, so the engine runs as it does with a real device.
 //
 // DW_AUDIO_LOG=1 lists the calls and names every property this file has no answer for.
 #define _GNU_SOURCE
@@ -33,7 +34,18 @@ void dw_CFRelease(void *o);
 #define OBJ_SYSTEM 1u
 #define OBJ_OUT_DEVICE 0x40u
 #define OBJ_OUT_STREAM 0x41u
+#define OBJ_IN_DEVICE 0x50u  // the guitar cable
+#define OBJ_IN_STREAM 0x51u
 #define RATE 48000.0
+
+// The host's sound (tools/ws7/recomp/app/host_audio_linux.h); weak, so this layer links without it.
+typedef void (*host_audio_render)(void *user, float *stereo, int frames);
+typedef void (*host_audio_capture)(void *user, const float *mono, int frames);
+__attribute__((weak)) int host_audio_out_start(int rate, int frames, host_audio_render cb, void *user);
+__attribute__((weak)) void host_audio_out_stop(void);
+__attribute__((weak)) int host_audio_in_present(char *name, size_t cap);
+__attribute__((weak)) int host_audio_in_start(int rate, int frames, host_audio_capture cb, void *user);
+__attribute__((weak)) void host_audio_in_stop(void);
 
 struct address { uint32_t selector, scope, element; };
 struct asbd {  // AudioStreamBasicDescription
@@ -80,8 +92,30 @@ static const char *cc(uint32_t v, char *b) {
   return b;
 }
 
-static _Atomic uint32_t g_frames = 256;  // the output device's I/O buffer, in frames
+static _Atomic uint32_t g_frames = 256;     // the output device's I/O buffer, in frames
+static _Atomic uint32_t g_in_frames = 128;  // the cable's
+static _Atomic uint32_t g_in_volume = 0x3f800000;  // the cable's input volume as the game set it (a float's bits)
 static const struct asbd g_device_format = {RATE, FOURCC('l', 'p', 'c', 'm'), 9 /* float, packed */, 8, 1, 8, 2, 32, 0};
+static const struct asbd g_cable_format = {RATE, FOURCC('l', 'p', 'c', 'm'), 9, 4, 1, 4, 1, 32, 0};
+
+// Whether a cable is plugged in, asked of the host at most twice a second, and its name.
+static char g_cable_name[128];
+static int cable_present(void) {
+  static _Atomic long last_ms = -1000000;
+  static _Atomic int present;
+  if (!host_audio_in_present) return 0;
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  long ms = (long)(t.tv_sec * 1000 + t.tv_nsec / 1000000);
+  if (ms - atomic_load(&last_ms) >= 500) {
+    char name[128] = "";
+    int p = host_audio_in_present(name, sizeof name);
+    if (p) memcpy(g_cable_name, name, sizeof name);
+    atomic_store(&present, p);
+    atomic_store(&last_ms, ms);
+  }
+  return atomic_load(&present);
+}
 
 // --- properties ------------------------------------------------------------------------------------
 // The answer to one property: its bytes in out (when not NULL) and its size, or an error.
@@ -92,10 +126,70 @@ static int32_t property(uint32_t obj, const struct address *a, void *out, uint32
   int output = scope != FOURCC('i', 'n', 'p', 't');
 #define PUT(x) do { memcpy(v, &(x), sizeof(x)); n = sizeof(x); } while (0)
   if (obj == OBJ_SYSTEM) {
-    uint32_t dev = OBJ_OUT_DEVICE, none = 0;
-    if (sel == FOURCC('d', 'e', 'v', '#') || sel == FOURCC('d', 'O', 'u', 't') || sel == FOURCC('s', 'O', 'u', 't')) PUT(dev);
-    else if (sel == FOURCC('d', 'I', 'n', ' ')) PUT(none);
+    uint32_t dev = OBJ_OUT_DEVICE, in = cable_present() ? OBJ_IN_DEVICE : 0;
+    if (sel == FOURCC('d', 'e', 'v', '#')) {
+      uint32_t both[2] = {OBJ_IN_DEVICE, OBJ_OUT_DEVICE};
+      if (in) PUT(both);
+      else PUT(dev);
+    } else if (sel == FOURCC('d', 'O', 'u', 't') || sel == FOURCC('s', 'O', 'u', 't')) PUT(dev);
+    else if (sel == FOURCC('d', 'I', 'n', ' ')) PUT(in);
     else goto unknown;
+  } else if (obj == OBJ_IN_DEVICE) {
+    int input = scope != FOURCC('o', 'u', 't', 'p');
+    if (sel == FOURCC('l', 'n', 'a', 'm') || sel == FOURCC('u', 'i', 'd', ' ') || sel == FOURCC('l', 'm', 'a', 'k') ||
+        sel == FOURCC('m', 'u', 'i', 'd')) {
+      // The game knows the cable by its name, or by the USB ids in its model UID.
+      void *s = dw_cf_string(sel == FOURCC('l', 'n', 'a', 'm') ? "Rocksmith USB Guitar Adapter"
+                             : sel == FOURCC('l', 'm', 'a', 'k') ? "Hercules"
+                             : sel == FOURCC('m', 'u', 'i', 'd') ? "Rocksmith USB Guitar Adapter:12BA:00FF"
+                                                                 : "rs-rearmed-cable");
+      PUT(s);
+      if (!out) dw_CFRelease(s);
+    } else if (sel == FOURCC('s', 't', 'm', '#')) {
+      uint32_t st = OBJ_IN_STREAM;
+      if (input) PUT(st);
+    } else if (sel == FOURCC('s', 'l', 'a', 'y')) {
+      struct { uint32_t count, pad; struct audio_buffer b; } l = {input ? 1u : 0u, 0, {1, 0, 0}};
+      memcpy(v, &l, input ? 24 : 8);
+      n = input ? 24 : 8;
+    } else if (sel == FOURCC('n', 's', 'r', 't')) {
+      double r = RATE;
+      PUT(r);
+    } else if (sel == FOURCC('n', 's', 'r', '#')) {
+      struct value_range r = {RATE, RATE};
+      PUT(r);
+    } else if (sel == FOURCC('f', 's', 'i', 'z')) {
+      uint32_t f = atomic_load(&g_in_frames);
+      PUT(f);
+    } else if (sel == FOURCC('f', 's', 'z', '#')) {
+      struct value_range r = {64, 2048};
+      PUT(r);
+    } else if (sel == FOURCC('t', 'r', 'a', 'n')) {
+      uint32_t t = FOURCC('u', 's', 'b', ' ');
+      PUT(t);
+    } else if (sel == FOURCC('l', 'i', 'v', 'n') || sel == FOURCC('g', 'o', 'i', 'n')) {
+      uint32_t one = cable_present() ? 1u : 0u;
+      PUT(one);
+    } else if (sel == FOURCC('l', 't', 'n', 'c') || sel == FOURCC('s', 'a', 'f', 't') || sel == FOURCC('h', 'o', 'g', 'r')) {
+      uint32_t zero = sel == FOURCC('h', 'o', 'g', 'r') ? (uint32_t)-1 : 0;
+      PUT(zero);
+    } else if (sel == FOURCC('s', 'f', 'm', 't') || sel == FOURCC('p', 'f', 't', ' ')) {
+      if (!input) goto unknown;
+      PUT(g_cable_format);
+    } else if (sel == FOURCC('v', 'o', 'l', 'm')) {
+      if (!input) goto unknown;
+      uint32_t bits = atomic_load(&g_in_volume);
+      PUT(bits);
+    } else goto unknown;
+  } else if (obj == OBJ_IN_STREAM) {
+    if (sel == FOURCC('s', 'f', 'm', 't') || sel == FOURCC('p', 'f', 't', ' ')) PUT(g_cable_format);
+    else if (sel == FOURCC('s', 'd', 'i', 'r')) {
+      uint32_t one = 1;
+      PUT(one);
+    } else if (sel == FOURCC('l', 't', 'n', 'c')) {
+      uint32_t zero = 0;
+      PUT(zero);
+    } else goto unknown;
   } else if (obj == OBJ_OUT_DEVICE) {
     if (sel == FOURCC('l', 'n', 'a', 'm') || sel == FOURCC('u', 'i', 'd', ' ') || sel == FOURCC('l', 'm', 'a', 'k') ||
         sel == FOURCC('m', 'u', 'i', 'd')) {
@@ -189,6 +283,30 @@ int32_t dw_AudioObjectSetPropertyData(uint32_t obj, const struct address *a, uin
     say("output device rate asked: %.0f (it is %.0f)", r, RATE);
     return 0;
   }
+  if (obj == OBJ_IN_DEVICE && a->selector == FOURCC('f', 's', 'i', 'z') && size == 4) {
+    uint32_t f;
+    memcpy(&f, data, 4);
+    if (f < 64) f = 64;
+    if (f > 2048) f = 2048;
+    atomic_store(&g_in_frames, f);
+    say("cable buffer: %u frames", f);
+    return 0;
+  }
+  if (obj == OBJ_IN_DEVICE && a->selector == FOURCC('v', 'o', 'l', 'm') && size == 4) {
+    uint32_t bits;
+    memcpy(&bits, data, 4);
+    atomic_store(&g_in_volume, bits);
+    return 0;
+  }
+  if (obj == OBJ_IN_DEVICE && a->selector == FOURCC('n', 's', 'r', 't') && size == 8) return 0;
+  // A format the game sets on the cable: it is 48 kHz mono, handed over as float, whatever is asked.
+  if ((obj == OBJ_IN_DEVICE || obj == OBJ_IN_STREAM) &&
+      (a->selector == FOURCC('p', 'f', 't', ' ') || a->selector == FOURCC('s', 'f', 'm', 't')) && size >= sizeof(struct asbd)) {
+    struct asbd f;
+    memcpy(&f, data, sizeof f);
+    say("cable format asked: %.0f Hz, %u channels, %u bits, flags 0x%x", f.rate, f.channels, f.bits, f.flags);
+    return 0;
+  }
   if (obj == OBJ_SYSTEM && a->selector == FOURCC('r', 'n', 'l', 'p')) return 0;  // the HAL's run loop: none here
   say("object %u: a write to '%s' (%u bytes) is not taken", obj, cc(a->selector, s), size);
   return (int32_t)ERR_UNKNOWN_PROPERTY;
@@ -203,16 +321,60 @@ int32_t dw_AudioObjectRemovePropertyListener(uint32_t obj, const struct address 
   return 0;
 }
 
-// --- device I/O procs: there are no input devices to run one on -------------------------------------
-int32_t dw_AudioDeviceCreateIOProcID(uint32_t dev, void *proc, void *client, void **id) {
-  (void)proc; (void)client;
-  say("AudioDeviceCreateIOProcID(%u): no such input device", dev);
-  if (id) *id = 0;
-  return (int32_t)ERR_BAD_OBJECT;
+// --- the cable's I/O proc ---------------------------------------------------------------------------
+// OSStatus proc(device, now, inputData, inputTime, outputData, outputTime, client)
+typedef int32_t (*io_proc)(uint32_t dev, const struct timestamp *now, const struct buffer_list *in,
+                           const struct timestamp *in_time, struct buffer_list *out, const struct timestamp *out_time,
+                           void *client);
+static io_proc g_io_proc;
+static void *g_io_client;
+static double g_in_sample;
+static uint64_t mono_ns(void) {
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
 }
-int32_t dw_AudioDeviceDestroyIOProcID(uint32_t dev, void *id) { (void)dev; (void)id; return 0; }
-int32_t dw_AudioDeviceStart(uint32_t dev, void *id) { (void)dev; (void)id; return (int32_t)ERR_BAD_OBJECT; }
-int32_t dw_AudioDeviceStop(uint32_t dev, void *id) { (void)dev; (void)id; return 0; }
+static void cable_frames(void *user, const float *mono, int frames) {
+  (void)user;
+  io_proc proc = g_io_proc;
+  if (!proc) return;
+  float gain;
+  uint32_t bits = atomic_load(&g_in_volume);
+  memcpy(&gain, &bits, 4);
+  (void)gain;  // the game applies its own level; the volume is only kept for it to read back
+  struct buffer_list in = {1, 0, {{1, (uint32_t)frames * 4, (void *)(uintptr_t)mono}}}, out = {0, 0, {{0}}};
+  struct timestamp ts = {g_in_sample, mono_ns(), 1.0, 0, {0}, 3, 0};
+  g_in_sample += frames;
+  proc(OBJ_IN_DEVICE, &ts, &in, &ts, &out, &ts, g_io_client);
+}
+int32_t dw_AudioDeviceCreateIOProcID(uint32_t dev, void *proc, void *client, void **id) {
+  if (dev != OBJ_IN_DEVICE || !proc) {
+    say("AudioDeviceCreateIOProcID(%u): not an input device of this layer", dev);
+    if (id) *id = 0;
+    return (int32_t)ERR_BAD_OBJECT;
+  }
+  g_io_client = client;
+  g_io_proc = (io_proc)proc;
+  if (id) *id = proc;
+  return 0;
+}
+int32_t dw_AudioDeviceStart(uint32_t dev, void *id) {
+  (void)id;
+  if (dev != OBJ_IN_DEVICE || !g_io_proc || !host_audio_in_start) return (int32_t)ERR_BAD_OBJECT;
+  if (host_audio_in_start((int)RATE, (int)atomic_load(&g_in_frames), cable_frames, 0)) return (int32_t)ERR_BAD_OBJECT;
+  say("cable started, %u frames a period", atomic_load(&g_in_frames));
+  return 0;
+}
+int32_t dw_AudioDeviceStop(uint32_t dev, void *id) {
+  (void)id;
+  if (dev == OBJ_IN_DEVICE && host_audio_in_stop) host_audio_in_stop();
+  return 0;
+}
+int32_t dw_AudioDeviceDestroyIOProcID(uint32_t dev, void *id) {
+  dw_AudioDeviceStop(dev, id);
+  if (dev == OBJ_IN_DEVICE) g_io_proc = 0;
+  return 0;
+}
 
 // --- the graph ---------------------------------------------------------------------------------------
 typedef int32_t (*render_proc)(void *refcon, uint32_t *flags, const struct timestamp *ts, uint32_t bus, uint32_t frames,
@@ -232,6 +394,7 @@ struct graph {
   int nodes;
   pthread_t thread;
   _Atomic int running, stop;
+  int on_host;  // played by the host's sound output, not the clock thread
 };
 
 int32_t dw_NewAUGraph(struct graph **out) {
@@ -310,6 +473,59 @@ int32_t dw_AudioUnitSetParameter(struct unit *u, uint32_t id, uint32_t scope, ui
 }
 int32_t dw_AudioUnitUninitialize(struct unit *u) { (void)u; return 0; }
 
+// The unit whose input callback feeds the output: the output unit's own, or the one connected to it.
+static struct unit *graph_source(struct graph *g) {
+  struct unit *out = 0;
+  for (int i = 0; i < g->nodes; i++)
+    if (g->node[i].type == FOURCC('a', 'u', 'o', 'u')) out = &g->node[i];
+  if (!out && g->nodes) out = &g->node[g->nodes - 1];
+  struct unit *src = out;
+  for (int hop = 0; src && !src->proc && src->source && hop < MAX_NODES; hop++) src = src->source;
+  return src && src->proc ? src : 0;
+}
+
+// The host's output asks for stereo frames: the engine is pulled in blocks of at most the device buffer
+// it was told (it sized its ring by that), in its own format, and the block is interleaved.
+static double g_out_sample;
+static void host_render(void *user, float *stereo, int frames) {
+  struct graph *g = user;
+  struct unit *src = graph_source(g);
+  static float planar[2][4096];
+  memset(stereo, 0, (size_t)frames * 2 * sizeof(float));
+  if (!src) return;
+  const struct asbd *f = &src->in_format;
+  int is_float = (f->flags & 1) && f->bits == 32, planes = (f->flags & 0x20) != 0;
+  uint32_t ch = f->channels >= 2 ? 2 : 1;
+  if (!is_float) return;  // the engine asks for float; anything else stays silent
+  for (int done = 0; done < frames;) {
+    uint32_t block = atomic_load(&g_frames);
+    if (block > 4096 / 2) block = 4096 / 2;
+    if ((int)block > frames - done) block = (uint32_t)(frames - done);
+    struct buffer_list l = {planes ? ch : 1, 0, {{0}}};
+    if (planes)
+      for (uint32_t i = 0; i < ch; i++) {
+        l.b[i] = (struct audio_buffer){1, block * 4, planar[i]};
+        memset(planar[i], 0, block * 4);
+      }
+    else {
+      l.b[0] = (struct audio_buffer){ch, block * 4 * ch, planar[0]};
+      memset(planar[0], 0, block * 4 * ch);
+    }
+    struct timestamp ts = {g_out_sample, mono_ns(), 1.0, 0, {0}, 3, 0};
+    uint32_t flags = 0;
+    src->proc(src->refcon, &flags, &ts, 0, block, &l);
+    float *o = stereo + (size_t)done * 2;
+    for (uint32_t i = 0; i < block; i++) {
+      float a = planes ? planar[0][i] : planar[0][i * ch];
+      float b = ch < 2 ? a : planes ? planar[1][i] : planar[0][i * ch + 1];
+      o[2 * i] = a;
+      o[2 * i + 1] = b;
+    }
+    g_out_sample += block;
+    done += (int)block;
+  }
+}
+
 // The clock: asks the output unit's input for a buffer every period and drops it.
 static uint64_t now_ns(void) {
   struct timespec t;
@@ -360,6 +576,12 @@ int32_t dw_AUGraphStart(struct graph *g) {
   if (!g) return ERR_PARAM;
   if (atomic_exchange(&g->running, 1)) return 0;
   atomic_store(&g->stop, 0);
+  if (host_audio_out_start && host_audio_out_start((int)RATE, (int)atomic_load(&g_frames), host_render, g) > 0) {
+    g->on_host = 1;
+    say("graph started on the host's sound output");
+    return 0;
+  }
+  g->on_host = 0;
   if (pthread_create(&g->thread, 0, null_run, g)) {
     atomic_store(&g->running, 0);
     return ERR_PARAM;
@@ -370,6 +592,10 @@ int32_t dw_AUGraphStart(struct graph *g) {
 int32_t dw_AUGraphStop(struct graph *g) {
   if (!g) return ERR_PARAM;
   if (!atomic_exchange(&g->running, 0)) return 0;
+  if (g->on_host) {
+    if (host_audio_out_stop) host_audio_out_stop();
+    return 0;
+  }
   atomic_store(&g->stop, 1);
   pthread_join(g->thread, 0);
   return 0;
