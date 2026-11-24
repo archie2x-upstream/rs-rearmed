@@ -11,15 +11,21 @@
 #include "shim.h"
 #include "enumerate.h"
 
+#ifdef __APPLE__
 #include <copyfile.h>
+#endif
 #include <dirent.h>
 #include <errno.h>
+#ifdef __APPLE__
 #include <removefile.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#ifdef __APPLE__
 #include <sys/sysctl.h>
+#endif
 #include <time.h>
 #include <unistd.h>
 
@@ -87,6 +93,7 @@ static std::string remote_dir() {
         // Copied beside its place and renamed, the credentials dropped first: a copy that stops half way (no
         // room, a file that can't be read) is taken away, so the game never has a `crd` or part of the saves,
         // and the saves start empty as they do without Steam's (the log says why).
+#ifdef __APPLE__  // a Linux host has no Steam copy of this game's saves to start from
         std::string tmp = dir + ".seedtmp";
         removefile(tmp.c_str(), nullptr, REMOVEFILE_RECURSIVE);
         if (is_dir(src)) {
@@ -101,6 +108,9 @@ static std::string remote_dir() {
                      strerror(errno));
             removefile(tmp.c_str(), nullptr, REMOVEFILE_RECURSIVE);
         }
+#else
+        (void)src;
+#endif
         mkdirs(dir);
     });
     return dir;
@@ -405,11 +415,17 @@ class Utils {
 public:
     virtual uint32_t GetSecondsSinceAppActive() { return (uint32_t)(time(nullptr) - g_start_time); }
     virtual uint32_t GetSecondsSinceComputerActive() {
+#ifdef __APPLE__
         struct timeval boot;
         size_t len = sizeof boot;
         int mib[2] = {CTL_KERN, KERN_BOOTTIME};
         if (sysctl(mib, 2, &boot, &len, nullptr, 0) != 0) return 0;
         return (uint32_t)(time(nullptr) - boot.tv_sec);
+#else
+        struct timespec up;
+        if (clock_gettime(CLOCK_BOOTTIME, &up) != 0) return 0;
+        return (uint32_t)up.tv_sec;
+#endif
     }
     virtual int GetConnectedUniverse() { return 1; }  // k_EUniversePublic
     virtual uint32_t GetServerRealTime() { return (uint32_t)time(nullptr); }

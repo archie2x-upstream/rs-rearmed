@@ -13,7 +13,9 @@
 
 #include <dlfcn.h>
 #include <limits.h>
+#ifdef __APPLE__
 #include <mach-o/dyld.h>
+#endif
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -150,10 +152,18 @@ static void load_config() {
     c.steam_root = std::string(home ? home : "") + "/Library/Application Support/Steam";
 
     char exe[PATH_MAX];
+#ifdef __APPLE__
     uint32_t sz = sizeof exe;
     std::string exe_path = _NSGetExecutablePath(exe, &sz) == 0 ? exe : ".";
     size_t app = exe_path.rfind(".app/Contents/MacOS/");
     c.game_dir = app != std::string::npos ? dirname_of(exe_path.substr(0, app + 4)) : dirname_of(exe_path);
+#else
+    // A Linux host: the program is not inside the game folder, so the host names it (RS_GAME_DIR).
+    ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+    std::string exe_path = n > 0 ? std::string(exe, (size_t)n) : ".";
+    const char *gd = getenv("RS_GAME_DIR");
+    c.game_dir = gd && *gd ? gd : dirname_of(exe_path);
+#endif
     std::string exe_dir = dirname_of(exe_path);
 
     Dl_info info;
@@ -225,7 +235,15 @@ static void load_config() {
 
     c.data_dir = opt("RS_STEAM_DATA_DIR", "data_dir");
     if (c.data_dir.empty())
+#ifdef __APPLE__
         c.data_dir = std::string(home ? home : "/tmp") + "/Library/Application Support/RocksmithSteamShim/userdata";
+#else
+    {
+        const char *xdg = getenv("XDG_DATA_HOME");
+        c.data_dir = (xdg && *xdg ? std::string(xdg) : std::string(home ? home : "/tmp") + "/.local/share") +
+                     "/rs-rearmed/steam-userdata";
+    }
+#endif
 
     c.real_lib = opt("RS_STEAM_REAL_LIB", "real_lib");
     if (c.real_lib.empty()) {

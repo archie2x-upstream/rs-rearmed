@@ -26,7 +26,11 @@
 #ifndef RS_STEAM_ENUMERATE_H
 #define RS_STEAM_ENUMERATE_H
 
+#ifdef __APPLE__
 #include <copyfile.h>
+#else
+#include <fcntl.h>
+#endif
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
@@ -173,6 +177,34 @@ static bool enumerate_room(const EnumerateCopy &e, const struct stat &st) {
     return (unsigned long long)v.f_bavail * v.f_frsize >= (unsigned long long)st.st_size + kEnumerateMargin;
 }
 
+// Copy one file's contents; 0 on success, else -1 with errno set.
+static int enumerate_copy_file(const char *src, const char *dst) {
+#ifdef __APPLE__
+    return copyfile(src, dst, nullptr, COPYFILE_CLONE);
+#else
+    int in = open(src, O_RDONLY | O_CLOEXEC);
+    if (in < 0) return -1;
+    int out = open(dst, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (out < 0) { int e = errno; close(in); errno = e; return -1; }
+    static char buf[1 << 16];  // one copy runs at a time (the enumerate job)
+    int err = 0;
+    while (!err) {
+        ssize_t n = read(in, buf, sizeof buf);
+        if (n < 0) err = errno;
+        if (n <= 0) break;
+        for (ssize_t off = 0; off < n && !err;) {
+            ssize_t w = write(out, buf + off, (size_t)(n - off));
+            if (w < 0) err = errno;
+            else off += w;
+        }
+    }
+    close(in);
+    if (close(out) != 0 && !err) err = errno;
+    if (err) { errno = err; return -1; }
+    return 0;
+#endif
+}
+
 // One archive, written next to its place first, so the game never sees half a file; REL is its path in the copy.
 static void enumerate_one(EnumerateCopy &e, const std::string &from, const std::string &rel, const struct stat &st) {
     std::string to = e.game_dir + "/" + rel, part = to + ".part";
@@ -187,7 +219,7 @@ static void enumerate_one(EnumerateCopy &e, const std::string &from, const std::
     // one makes a dangling file here, copied again at every press.
     char real[PATH_MAX];
     const char *src = realpath(from.c_str(), real) ? real : from.c_str();
-    if (copyfile(src, part.c_str(), nullptr, COPYFILE_CLONE) != 0 || rename(part.c_str(), to.c_str()) != 0) {
+    if (enumerate_copy_file(src, part.c_str()) != 0 || rename(part.c_str(), to.c_str()) != 0) {
         e.stop = errno == ENOSPC;
         enumerate_say(strerror(errno), rel);
         unlink(part.c_str());

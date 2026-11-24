@@ -29,6 +29,14 @@ DW_OWN(X)
 #undef X
 extern char dw__DefaultRuneLocale, dw___mb_cur_max, dw_mach_task_self_, dw_pthread_attr_noop, dw_net_refuse;
 
+// The printf family on a converted argument list (dw_libc.c). The game's own v* imports arrive with their
+// x86 va_list already turned into slots by the import thunk, so they bind to the same functions.
+extern char rc_host_vprintf, rc_host_vfprintf, rc_host_vsprintf, rc_host_vsnprintf, rc_host_vasprintf,
+    rc_host_vsscanf, rc_host___vsprintf_chk;
+// Imports the thunk answers without its slot (the variadic printf family, and the file calls that go
+// through rc_file): bound to this so they are not counted as missing. It is never called.
+static void in_thunk(void) {}
+
 static const struct { const char *name; void *p; } own[] = {
 #define X(n) {#n, &dw_##n},
     DW_OWN(X)
@@ -36,6 +44,12 @@ static const struct { const char *name; void *p; } own[] = {
     {"_DefaultRuneLocale", &dw__DefaultRuneLocale},
     {"___mb_cur_max", &dw___mb_cur_max},
     {"mach_task_self_", &dw_mach_task_self_},
+    {"vprintf", &rc_host_vprintf}, {"vfprintf", &rc_host_vfprintf}, {"vsprintf", &rc_host_vsprintf},
+    {"vsnprintf", &rc_host_vsnprintf}, {"vasprintf", &rc_host_vasprintf}, {"vsscanf", &rc_host_vsscanf},
+    {"__vsprintf_chk", &rc_host___vsprintf_chk},
+    {"printf", in_thunk}, {"fprintf", in_thunk}, {"sprintf", in_thunk}, {"snprintf", in_thunk},
+    {"asprintf", in_thunk}, {"sscanf", in_thunk}, {"__sprintf_chk", in_thunk}, {"NSLog", in_thunk},
+    {"fopen", in_thunk}, {"open", in_thunk}, {"select", in_thunk},
     // scheduling attributes: accepted, the host's scheduling is used
     {"pthread_attr_setinheritsched", &dw_pthread_attr_noop},
     {"pthread_attr_setschedparam", &dw_pthread_attr_noop},
@@ -70,6 +84,21 @@ static const char *const same[] = {
     "pthread_detach", "pthread_exit", "pthread_join", "pthread_self",
 };
 
+// --- OpenGL: the host's, by name. The game calls OpenGL 2.1 with the C ABI both systems share. ----------
+// The library is opened the first time a GL name is asked for; without one those imports stay unresolved.
+static void *gl_symbol(const char *name) {
+  static void *lib;
+  static int tried;
+  if (!tried) {
+    tried = 1;
+    lib = dlopen("libGL.so.1", RTLD_NOW | RTLD_GLOBAL);
+    if (!lib) fprintf(stderr, "[dw] no libGL.so.1: %s\n", dlerror());
+  }
+  return lib ? dlsym(lib, name) : 0;
+}
+// CGL's context lock: the host shell draws from one thread at a time.
+static int dw_cgl_ok(void) { return 0; }
+
 void *rc_host_symbol(const char *name) {
   for (size_t i = 0; i < sizeof own / sizeof *own; i++)
     if (!strcmp(own[i].name, name)) return own[i].p;
@@ -78,6 +107,10 @@ void *rc_host_symbol(const char *name) {
   if (!strcmp(name, "__stderrp")) return &stderr;
   for (size_t i = 0; i < sizeof same / sizeof *same; i++)
     if (!strcmp(same[i], name)) return dlsym(RTLD_DEFAULT, name);
+  if (name[0] == 'g' && name[1] == 'l' && name[2] >= 'A' && name[2] <= 'Z') return gl_symbol(name);
+  // Steam: the offline stand-in linked into the program (shims/steam)
+  if (!strncmp(name, "Steam", 5)) return dlsym(RTLD_DEFAULT, name);
+  if (!strcmp(name, "CGLLockContext") || !strcmp(name, "CGLUnlockContext")) return (void *)dw_cgl_ok;
   // C++: the host's libstdc++ has the same ABI as the libstdc++ 4.2 the game was built with
   if (name[0] == '_' && name[1] == 'Z') return dlsym(RTLD_DEFAULT, name);
   if (!strncmp(name, "__cxa_", 6) || !strncmp(name, "__gxx_", 6) || !strcmp(name, "__dynamic_cast"))

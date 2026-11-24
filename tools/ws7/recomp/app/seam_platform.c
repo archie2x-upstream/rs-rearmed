@@ -16,6 +16,9 @@
 //  * the focus byte 0x10194b391 is mirrored by hooks.app_active (SetFocus).
 //  * efd path hooks are re-installed with the native rsp_path_* functions,
 //    which copy the root verbatim (the original passes it as a format string).
+#ifndef __APPLE__
+#define _GNU_SOURCE
+#endif
 #include <pthread.h>
 #include <time.h>
 #include <stdint.h>
@@ -28,6 +31,18 @@
 #include "rc_abi.h"
 #include "rc_rt.h"
 #include "seam.h"
+
+#ifndef __APPLE__
+// The two Darwin calls this file uses, on a Linux host.
+#include <unistd.h>
+static int pthread_main_np(void) { return gettid() == getpid(); }
+#define CLOCK_UPTIME_RAW CLOCK_MONOTONIC
+static uint64_t clock_gettime_nsec_np(clockid_t clock) {
+  struct timespec t;
+  clock_gettime(clock, &t);
+  return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+}
+#endif
 
 // Game functions and data by name (tools/targets/names/seam.list; addresses, prototypes and offsets in the
 // target's symbols.map / offsets.map).
