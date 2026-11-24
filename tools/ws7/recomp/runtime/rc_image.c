@@ -23,6 +23,10 @@
 
 #include "rc_rt.h"
 
+#ifndef __APPLE__
+void *rc_host_symbol(const char *name);  // shims/linux/darwin/dw_bind.c
+#endif
+
 uint64_t rc_slide;
 rc_image_stats rc_stats;
 
@@ -221,6 +225,7 @@ static void note_unresolved(const char *name, int64_t ord, int mode) {
             name, (long long)ord, ord > 0 && ord <= ndylibs ? dylibs[ord - 1] : ord == 0 ? "self" : ord == -1 ? "main executable" : "flat lookup");
 }
 
+#ifdef __APPLE__
 static void *handle_for(int64_t ord) {
   if (ord < 1 || ord > ndylibs) return RTLD_DEFAULT;
   if (!dl_handle[ord - 1]) {
@@ -236,6 +241,7 @@ static void *handle_for(int64_t ord) {
   }
   return dl_handle[ord - 1];
 }
+#endif
 
 // mode: 0 regular, 1 lazy, 2 weak. Returns 1 and sets *v if resolved.
 static int resolve(const char *name, int64_t ord, int mode, uint64_t *v) {
@@ -249,6 +255,7 @@ static int resolve(const char *name, int64_t ord, int mode, uint64_t *v) {
   }
   const char *sym = name[0] == '_' ? name + 1 : name;
   void *p = 0;
+#ifdef __APPLE__
   if (ord > 0) p = dlsym(handle_for(ord), sym);
   if (!p) p = dlsym(RTLD_DEFAULT, sym);
   if (!p && strchr(sym, '$') && strncmp(sym, "OBJC_", 5)) {
@@ -258,6 +265,14 @@ static int resolve(const char *name, int64_t ord, int mode, uint64_t *v) {
     *strchr(plain, '$') = 0;
     p = dlsym(RTLD_DEFAULT, plain);
   }
+#else
+  // Not macOS: the host's Darwin layer says what the import is bound to (shims/linux/darwin). A name
+  // it does not know stays unresolved: the host's function of the same name may have another ABI.
+  char plain[256];
+  strlcpy(plain, sym, sizeof plain);
+  if (strchr(plain, '$') && strncmp(plain, "OBJC_", 5)) *strchr(plain, '$') = 0;
+  p = rc_host_symbol(plain);
+#endif
   if (p) {
     *v = (uint64_t)p;
     rc_stats.bound_dl++;

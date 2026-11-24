@@ -33,6 +33,8 @@ from thunks.imports import slot_info  # noqa: E402
 
 ROOT = os.path.abspath(os.path.join(HERE, "..", "..", "..", ".."))
 
+HOST = "macos"  # --host
+
 # --- printf/scanf family: guest variadic call -> native v* function -----------------
 FMT_VARIADIC = {  # name -> (native v-function, kind)
     "printf": ("vprintf", "RC_VA_PRINTF"), "fprintf": ("vfprintf", "RC_VA_PRINTF"),
@@ -608,7 +610,9 @@ class Gen:
             o.append('_Static_assert(sizeof(%s rc_%s) == %d && _Alignof(%s rc_%s) == %d, "layout of %s");'
                      % (tag, name, size, tag, name, align, name))
         for sym, ident in sorted(self.direct.items()):
-            o.append('extern char %s __asm__("_%s");' % (ident, sym))
+            # macOS: the native function itself. A Linux host (--host linux): the host's Darwin layer has one
+            # in front of each, rc_host_<name> (shims/linux/darwin), since the arguments are Darwin's.
+            o.append('extern char %s __asm__("%s");' % (ident, ("rc_host_" if HOST == "linux" else "_") + sym))
         o.append("")
         for slot, sym, body in self.thunks:
             o.append("// %s" % sym)
@@ -669,7 +673,11 @@ def main():
     ap.add_argument("--variadic", action="append", default=[], metavar="NAME=int,long",
                     help="a variadic function whose extra arguments are these integer types (repeatable)")
     ap.add_argument("--header", action="append", default=[], help="extra C header with prototypes (repeatable)")
+    ap.add_argument("--host", choices=("macos", "linux"), default="macos",
+                    help="the system the thunks are compiled for (default macos)")
     a = ap.parse_args()
+    global HOST
+    HOST = a.host
     for v in a.variadic:
         name, _, types = v.partition("=")
         EXTRA_VARIADIC[name] = [t for t in types.split(",") if t]
