@@ -352,7 +352,13 @@ static void fixup_section(const struct section_64 *sc) {
     // each entry points at the selector's C string (SEL is a pointer to a uniqued string)
     typedef const void *(*regfn)(const char *);
     regfn reg = (regfn)dlsym(RTLD_DEFAULT, "sel_registerName");
+#ifdef __APPLE__
     if (!reg) rc_fail("sel_registerName not found (libobjc not loaded)", 0);
+#else
+    // A host with no Objective-C runtime: the entries stay pointers to the selectors' own strings until
+    // a stand-in that exports sel_registerName is loaded before the image.
+    if (!reg) return;
+#endif
     for (size_t i = 0; i < n; i++, rc_stats.selrefs++) e[i] = (uint64_t)reg((const char *)e[i]);
   } else if (SECT_IS(sc, "__objc_classrefs") || SECT_IS(sc, "__objc_superrefs")) {
     int sup = sc->sectname[7] == 's';

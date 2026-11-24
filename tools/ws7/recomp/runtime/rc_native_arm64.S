@@ -7,12 +7,18 @@
 // x0..x7 = ix[0..7], d0..d7 = dx[0..7] (low 64 bits), then `blr fn`. ret gets
 // x0, x1, d0, d1 (and d2, d3 for _hfa). The callee sees no stack arguments.
 
+#ifdef __APPLE__
+#define RC_SYM(n) _##n
+#else
+#define RC_SYM(n) n  // ELF: C symbols have no underscore
+#endif
+
         .text
         .p2align 2
 
         .macro RC_NATIVE_CALL name, sret, hfa
-        .globl _\name
-_\name:
+        .globl \name
+\name:
         stp     x29, x30, [sp, #-32]!
         mov     x29, sp
         stp     x19, x20, [sp, #16]
@@ -43,6 +49,10 @@ _\name:
         ret
         .endmacro
 
-        RC_NATIVE_CALL rc_native_call, 0, 0
-        RC_NATIVE_CALL rc_native_call_x8, 1, 0
-        RC_NATIVE_CALL rc_native_call_hfa, 0, 1
+        RC_NATIVE_CALL RC_SYM(rc_native_call), 0, 0
+        RC_NATIVE_CALL RC_SYM(rc_native_call_x8), 1, 0
+        RC_NATIVE_CALL RC_SYM(rc_native_call_hfa), 0, 1
+
+#ifdef __ELF__
+        .section .note.GNU-stack,"",%progbits
+#endif

@@ -6,6 +6,14 @@
 // (up to four floats or doubles, e.g. CGRect) in d0-d3 and any other large
 // struct through the buffer in x8. Which one applies depends on the struct
 // type, which we read from the method's type encoding.
+#ifndef __APPLE__
+// No Objective-C runtime on this host yet: the call is reported, not forwarded.
+#include "rc_call.h"
+void rc_objc_msgsend_stret(rc_ctx *c) {
+  (void)c;
+  rc_fail("objc_msgSend_stret: no Objective-C runtime on this host", 0);
+}
+#else
 #include <objc/message.h>
 #include <objc/runtime.h>
 #include <stdlib.h>
@@ -100,3 +108,4 @@ void rc_objc_msgsend_stret(rc_ctx *c) {
   }
   c->r[0] = sret;
 }
+#endif

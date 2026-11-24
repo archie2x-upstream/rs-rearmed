@@ -5,6 +5,9 @@
 // A served file is a real descriptor, opened on /dev/null, and a record beside it: what the system does with a
 // descriptor (its number, dup, close, the open-file limit) holds for it, and read, seek and fstat are answered here.
 // RS_FILE_LOG=1 logs each served open and each listing a provider changed.
+#ifndef __APPLE__
+#define _GNU_SOURCE  // fopencookie
+#endif
 #include "rc_file.h"
 
 #include <errno.h>
@@ -221,8 +224,12 @@ static void fill_stat(struct stat *st, const rc_file_info *info, uintptr_t id) {
   st->st_size = (off_t)info->size;
   st->st_blksize = 4096;
   st->st_blocks = (blkcnt_t)((info->size + 511) / 512);
+#ifdef __APPLE__
   st->st_atimespec.tv_sec = st->st_mtimespec.tv_sec = st->st_ctimespec.tv_sec = st->st_birthtimespec.tv_sec =
       (time_t)info->mtime;
+#else
+  st->st_atim.tv_sec = st->st_mtim.tv_sec = st->st_ctim.tv_sec = (time_t)info->mtime;
+#endif
 }
 
 int rc_file_fstat(int fd, struct stat *st) {
@@ -261,24 +268,46 @@ int rc_file_stat(const char *path, struct stat *st) {
 }
 
 // --- FILE ---------------------------------------------------------------------------------------------------------
+#ifdef __APPLE__
 static int f_read(void *cookie, char *buf, int n) { return (int)rc_file_read((int)(intptr_t)cookie, buf, (size_t)n); }
 static fpos_t f_seek(void *cookie, fpos_t off, int whence) {
   return (fpos_t)rc_file_lseek((int)(intptr_t)cookie, (off_t)off, whence);
 }
 static int f_close(void *cookie) { return rc_file_close((int)(intptr_t)cookie); }
+#else
+// glibc: fopencookie in place of funopen.
+static ssize_t f_read(void *cookie, char *buf, size_t n) { return rc_file_read((int)(intptr_t)cookie, buf, n); }
+static int f_seek(void *cookie, off64_t *off, int whence) {
+  off_t r = rc_file_lseek((int)(intptr_t)cookie, (off_t)*off, whence);
+  if (r < 0) return -1;
+  *off = r;
+  return 0;
+}
+static int f_close(void *cookie) { return rc_file_close((int)(intptr_t)cookie); }
+#endif
 
 FILE *rc_file_fopen(const char *path, const char *mode) {
   if (!nprov() || !path || !mode || mode[0] != 'r' || strchr(mode, '+')) return fopen(path, mode);
   int fd = vf_open(path);
   if (fd == -2) return fopen(path, mode);
   if (fd < 0) return 0;
+#ifdef __APPLE__
   FILE *f = fd <= SHRT_MAX ? funopen((void *)(intptr_t)fd, f_read, 0, f_seek, f_close) : 0;
+#else
+  static const cookie_io_functions_t io = {.read = f_read, .seek = f_seek, .close = f_close};
+  FILE *f = fopencookie((void *)(intptr_t)fd, "r", io);
+#endif
   if (!f) {
     rc_file_close(fd);
     errno = EMFILE;
     return 0;
   }
+#ifdef __APPLE__
   f->_file = (short)fd;  // fileno: the game asks fstat for the size of some files it opened with fopen
+#else
+  // TODO(linux): a glibc cookie stream has no descriptor (fileno is -1), so the fstat the game does on
+  // some served files it opened with fopen is not answered yet.
+#endif
   // A file's buffer, not the placeholder's: stdio sizes a stream's buffer by its descriptor (/dev/null: 64 KB) and
   // fills it anew after every fseek of a funopen stream, so a seek and a short read cost the provider 64 KB.
   setvbuf(f, 0, _IOFBF, 4096);
@@ -384,9 +413,14 @@ struct dirent *rc_file_readdir(DIR *d) {
     memset(&v->ent, 0, sizeof v->ent);
     v->ent.d_ino = 1;
     v->ent.d_type = DT_REG;
+#ifdef __APPLE__
     v->ent.d_namlen = (__uint16_t)strlen(name);
     v->ent.d_reclen = sizeof v->ent;
     memcpy(v->ent.d_name, name, v->ent.d_namlen + 1);
+#else
+    v->ent.d_reclen = sizeof v->ent;
+    snprintf(v->ent.d_name, sizeof v->ent.d_name, "%s", name);
+#endif
     return &v->ent;
   }
   return 0;
