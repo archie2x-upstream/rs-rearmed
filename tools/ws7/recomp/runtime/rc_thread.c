@@ -5,6 +5,9 @@
 // native function called from guest code may call back into guest code on the
 // same thread; the whole ctx is saved and restored around the call, and the
 // callback's frame is placed below the guest rsp at the time of the native call.
+#ifndef __APPLE__
+#define _GNU_SOURCE  // gettid, pthread_getattr_np
+#endif
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -54,12 +57,24 @@ rc_thread *rc_thread_self(void) {
   t->ctx.r[4] = ((uint64_t)m + sz + pg) & ~15ull;
   t->ctx.mxcsr = 0x1f80;
   t->ctx.cg_fp = ~0ull;
+#ifdef __APPLE__
   uint64_t id;
   pthread_threadid_np(0, &id);
   t->tid = id;
   pthread_t self = pthread_self();
   t->nstack_hi = (uint64_t)pthread_get_stackaddr_np(self);
   t->nstack_lo = t->nstack_hi - pthread_get_stacksize_np(self);
+#else
+  t->tid = (uint64_t)gettid();
+  pthread_attr_t attr;
+  void *lo = 0;
+  size_t size = 0;
+  if (pthread_getattr_np(pthread_self(), &attr)) rc_fail("cannot read the native stack bounds", 0);
+  pthread_attr_getstack(&attr, &lo, &size);
+  pthread_attr_destroy(&attr);
+  t->nstack_lo = (uint64_t)lo;
+  t->nstack_hi = (uint64_t)lo + size;
+#endif
   tls_thread = t;
   pthread_setspecific(thread_key, t);
   return t;

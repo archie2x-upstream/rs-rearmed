@@ -19,7 +19,7 @@
 #define MAGIC 0x524a4d5000000000ull  // "RJMP" in the high word
 
 typedef struct {
-  uint64_t w[RC_JMP_HOST_WORDS + 2];  // host jmp_buf (256 bytes) ; val ; spare
+  uint64_t w[RC_JMP_HOST_WORDS + 2];  // host jmp_buf (RC_JMP_HOST_WORDS * 8 bytes) ; val ; spare
   uint64_t addr;                       // guest jmp_buf it belongs to
   uint64_t gen;                        // generation (0 = free)
   uint64_t rsp;                        // guest rsp at the setjmp call

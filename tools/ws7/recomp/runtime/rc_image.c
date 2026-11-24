@@ -9,7 +9,11 @@
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <pthread.h>
+#ifdef __APPLE__
 #include <mach-o/loader.h>
+#else
+#include "rc_macho.h"  // the same definitions, for hosts without the Mach-O headers
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

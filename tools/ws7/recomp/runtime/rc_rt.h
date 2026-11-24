@@ -114,7 +114,11 @@ int rc_native_is_sret(uint64_t fn);
 // --- setjmp (rc_setjmp.c); called from code emitted by calls_special.py
 // Returns the record whose first RC_JMP_HOST_WORDS words are the host jmp_buf
 // and word RC_JMP_VAL the value passed to longjmp.
+#ifdef __APPLE__
 #define RC_JMP_HOST_WORDS 32
+#else
+#define RC_JMP_HOST_WORDS 48  // glibc aarch64: jmp_buf is 312 bytes
+#endif
 #define RC_JMP_VAL 32
 uint64_t *rc_jmp_enter(rc_ctx *c, uint64_t guest_buf);
 _Noreturn void rc_longjmp(rc_ctx *c, uint64_t guest_buf, uint64_t val);
