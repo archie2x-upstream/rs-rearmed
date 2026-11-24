@@ -24,9 +24,33 @@
   X(semaphore_destroy) X(semaphore_signal) X(semaphore_wait) X(sem_open) X(sem_close) X(socket)                 \
   X(gethostbyname) X(getifaddrs) X(freeifaddrs) X(inet_addr) X(inet_ntoa)
 
+// CoreFoundation (dw_cf.c) and CoreAudio with the AUGraph (dw_coreaudio.c)
+#define DW_APPLE(X)                                                                                            \
+  X(CFAbsoluteTimeGetCurrent) X(CFArrayGetCount) X(CFArrayGetValueAtIndex) X(CFDataGetBytes)                    \
+  X(CFDictionaryCreateMutable) X(CFDictionarySetValue) X(CFLocaleCopyCurrent) X(CFLocaleGetValue) X(CFRelease)  \
+  X(CFShow) X(CFStringCompare) X(CFStringCreateWithBytes) X(CFStringGetBytes) X(CFStringGetCString)             \
+  X(CFStringGetCStringPtr) X(CFStringGetFastestEncoding) X(CFStringGetLength)                                   \
+  X(CFStringGetMaximumSizeForEncoding) X(CFStringGetSystemEncoding) X(CFUUIDCreateString)                       \
+  X(CFUUIDCreateWithBytes) X(kCFAllocatorDefault) X(kCFBooleanTrue) X(kCFCoreFoundationVersionNumber)           \
+  X(kCFLocaleCountryCode) X(kCFLocaleIdentifier) X(kCFLocaleLanguageCode) X(kCFTypeDictionaryKeyCallBacks)      \
+  X(kCFTypeDictionaryValueCallBacks)                                                                            \
+  X(AudioObjectGetPropertyDataSize) X(AudioObjectGetPropertyData) X(AudioObjectHasProperty)                     \
+  X(AudioObjectSetPropertyData) X(AudioObjectAddPropertyListener) X(AudioObjectRemovePropertyListener)          \
+  X(AudioDeviceCreateIOProcID) X(AudioDeviceDestroyIOProcID) X(AudioDeviceStart) X(AudioDeviceStop)             \
+  X(NewAUGraph) X(DisposeAUGraph) X(AUGraphAddNode) X(AUGraphOpen) X(AUGraphInitialize) X(AUGraphNodeInfo)      \
+  X(AUGraphConnectNodeInput) X(AUGraphSetNodeInputCallback) X(AUGraphStart) X(AUGraphStop) X(AUGraphClose)      \
+  X(AudioUnitSetProperty) X(AudioUnitSetParameter) X(AudioUnitUninitialize) X(AudioOutputUnitStop)             \
+  X(CGMainDisplayID) X(CGDisplayBounds) X(CGRectGetWidth) X(CGRectGetHeight) X(CGGetActiveDisplayList)          \
+  X(CGDisplayCopyAllDisplayModes) X(CGDisplayModeGetWidth) X(CGDisplayModeGetHeight)                            \
+  X(CGDisplayModeCopyPixelEncoding) X(CGDisplayIDToOpenGLDisplayMask) X(CGDisplayHideCursor)                    \
+  X(CGDisplayShowCursor) X(CGWindowLevelForKey) X(Gestalt)                                                     \
+  X(matrix_identity_float4x4) X(vcosf) X(vpowf) X(vDSP_create_fftsetup) X(vDSP_destroy_fftsetup) X(vDSP_fft_zop)
+
 #define X(n) extern char dw_##n;
 DW_OWN(X)
+DW_APPLE(X)
 #undef X
+extern char dw_cf_string_tag;
 extern char dw__DefaultRuneLocale, dw___mb_cur_max, dw_mach_task_self_, dw_pthread_attr_noop, dw_net_refuse;
 
 // The printf family on a converted argument list (dw_libc.c). The game's own v* imports arrive with their
@@ -40,7 +64,10 @@ static void in_thunk(void) {}
 static const struct { const char *name; void *p; } own[] = {
 #define X(n) {#n, &dw_##n},
     DW_OWN(X)
+    DW_APPLE(X)
 #undef X
+    {"__CFConstantStringClassReference", &dw_cf_string_tag},
+    {"__invert_f4", in_thunk},  // the thunk calls the runtime's helper, which finds dw_accel.c's by name
     {"_DefaultRuneLocale", &dw__DefaultRuneLocale},
     {"___mb_cur_max", &dw___mb_cur_max},
     {"mach_task_self_", &dw_mach_task_self_},
@@ -108,6 +135,8 @@ void *rc_host_symbol(const char *name) {
   for (size_t i = 0; i < sizeof same / sizeof *same; i++)
     if (!strcmp(same[i], name)) return dlsym(RTLD_DEFAULT, name);
   if (name[0] == 'g' && name[1] == 'l' && name[2] >= 'A' && name[2] <= 'Z') return gl_symbol(name);
+  // Cg: the shader shim linked into the program (shims/cg)
+  if (name[0] == 'c' && name[1] == 'g' && name[2] >= 'A' && name[2] <= 'Z') return dlsym(RTLD_DEFAULT, name);
   // Steam: the offline stand-in linked into the program (shims/steam)
   if (!strncmp(name, "Steam", 5)) return dlsym(RTLD_DEFAULT, name);
   if (!strcmp(name, "CGLLockContext") || !strcmp(name, "CGLUnlockContext")) return (void *)dw_cgl_ok;

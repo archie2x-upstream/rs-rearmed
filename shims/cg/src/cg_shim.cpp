@@ -25,6 +25,7 @@
 //                               (with their times) to stderr
 //   RS_CG_DUMP_GLSL=<dir>       write every generated GLSL shader there
 //                               (RS_CG_DUMP_DIR is the old name)
+#ifdef __APPLE__
 #define GL_SILENCE_DEPRECATION
 #include <OpenGL/OpenGL.h>
 #include <OpenGL/gl.h>
@@ -33,6 +34,26 @@
 #include <dlfcn.h>
 #include <mach-o/dyld.h>
 #include <mach/mach_time.h>
+#else
+// A Linux host: the system's OpenGL. What CGL tells the shim is which context is current and which
+// contexts share objects; here the context is the EGL or GLX one, each a share group of its own.
+#define GL_GLEXT_PROTOTYPES
+#include <GL/gl.h>
+#include <GL/glext.h>
+
+#include <dlfcn.h>
+#include <time.h>
+typedef void *CGLContextObj;
+typedef void *CGLShareGroupObj;
+static CGLContextObj CGLGetCurrentContext(void) {
+    typedef void *(*Fn)(void);
+    static Fn egl = (Fn)dlsym(RTLD_DEFAULT, "eglGetCurrentContext");
+    static Fn glx = (Fn)dlsym(RTLD_DEFAULT, "glXGetCurrentContext");
+    void *c = egl ? egl() : nullptr;
+    return c ? c : glx ? glx() : nullptr;
+}
+static CGLShareGroupObj CGLGetShareGroup(CGLContextObj c) { return c; }
+#endif
 #include <sys/stat.h>
 
 #include <algorithm>
@@ -110,11 +131,20 @@ struct Config {
         } else {
             // Like libRSOpenGL's Metal cache: only the app writes there by
             // default, never tools and tests.
+#ifdef __APPLE__
             char exe[4096];
             uint32_t n = sizeof exe;
             const char *home = getenv("HOME");
             if (home && *home && !_NSGetExecutablePath(exe, &n) && strstr(exe, ".app/Contents/MacOS/"))
                 pair_cache = std::string(home) + "/Library/Caches/rs-rearmed/cg-pairs.txt";
+#else
+            // The game itself sets RS_CG_PAIR_CACHE_DEFAULT (tools and tests do not): the cache is then
+            // under XDG_CACHE_HOME.
+            const char *on = getenv("RS_CG_PAIR_CACHE_DEFAULT");
+            const char *home = getenv("HOME"), *xdg = getenv("XDG_CACHE_HOME");
+            if (on && *on == '1' && ((xdg && *xdg) || (home && *home)))
+                pair_cache = (xdg && *xdg ? std::string(xdg) : std::string(home) + "/.cache") + "/rs-rearmed/cg-pairs.txt";
+#endif
         }
     }
 };
@@ -135,9 +165,15 @@ void logf(const char *fmt, ...) {
 }
 
 double now_us() {
+#ifdef __APPLE__
     static mach_timebase_info_data_t tb;
     if (!tb.denom) mach_timebase_info(&tb);
     return (double)mach_absolute_time() * tb.numer / tb.denom / 1000.0;
+#else
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (double)t.tv_sec * 1e6 + (double)t.tv_nsec / 1000.0;
+#endif
 }
 
 // GL calls the shim makes, by kind (rs_cg_gl_stats, cg_stats.h). Every GL call

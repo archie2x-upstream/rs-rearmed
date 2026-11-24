@@ -4,7 +4,9 @@
 //   rs-rearmed --init-only IMAGE         and run its __mod_init_func initializers, translated
 //   rs-rearmed --boot GAMEDIR IMAGE      and start the engine in GAMEDIR (the folder with the .psarc
 //                                        files and Rocksmith.ini) without a window: GameBootstrap,
-//                                        then RS_BOOT_FRAMES engine frames (default 0)
+//                                        then RS_BOOT_FRAMES engine frames (default 0), drawn to an
+//                                        offscreen OpenGL context of RS_DISPLAY (WIDTHxHEIGHT, default
+//                                        1280x720); RS_BOOT_SHOT=FILE.ppm saves the last frame
 //
 // IMAGE is the decrypted x86-64 Mach-O (RS_RC_IMAGE when it is not given). The imports are bound by the
 // Darwin layer (shims/linux/darwin); RC_LOG_UNRESOLVED lists the ones it has nothing for, and
@@ -16,6 +18,7 @@
 #include <time.h>
 
 #include "rc_rt.h"
+#include "host_gl_linux.h"
 #include "rsp_platform.h"
 #include "seam.h"
 
@@ -79,6 +82,14 @@ int main(int argc, char **argv, char **envp) {
     setenv("RS_GAME_DIR", boot_dir, 1);  // the offline Steam stand-in reads the game folder from it
     // The engine behind the platform hooks, as the macOS shell starts it, with no window and no
     // OpenGL context (the game takes a null one when the renderer owns the context).
+    int w = 1280, hgt = 720;
+    const char *de = getenv("RS_DISPLAY");
+    if (!de || sscanf(de, "%dx%d", &w, &hgt) != 2 || w <= 0 || hgt <= 0) w = 1280, hgt = 720;
+    char dbuf[32];
+    snprintf(dbuf, sizeof dbuf, "%dx%d", w, hgt);
+    setenv("RS_DISPLAY", dbuf, 1);  // the Darwin layer's one display is this size
+    int have_gl = host_gl_offscreen(w, hgt) == 0;
+    if (!have_gl) fprintf(stderr, "[rc] no OpenGL context: the engine starts, but a frame cannot draw\n");
     const rsp_engine_hooks *h = rcapp_seam_hooks();
     rsp_set_hooks(h);
     h->gl_context(h->ctx, NULL);
@@ -89,8 +100,12 @@ int main(int argc, char **argv, char **envp) {
     if (r) return 1;
     const char *fe = getenv("RS_BOOT_FRAMES");
     long frames = fe && *fe ? atol(fe) : 0, f = 0;
-    for (; f < frames; f++)
+    const char *shot = getenv("RS_BOOT_SHOT");
+    for (; f < frames; f++) {
       if (rsp_game_frame()) break;
+      if (have_gl && shot && *shot && f == frames - 1) host_gl_save_ppm(shot);
+      if (have_gl) host_gl_swap();
+    }
     if (frames) printf("boot: %ld of %ld engine frames run in %.3f s\n", f, frames, now_s() - t3);
     return 0;
   }
