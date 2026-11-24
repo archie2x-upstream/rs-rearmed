@@ -361,7 +361,23 @@ int dw_sysctlbyname(const char *name, void *old, size_t *oldlen, void *new, size
     is64 = 1;
   } else if (!strcmp(name, "hw.pagesize")) v = 4096;  // the x86 game's page
   else if (!strcmp(name, "hw.cpufrequency") || !strcmp(name, "hw.cpufrequency_max")) { v = 2400000000ull; is64 = 1; }
-  else {
+  else if (!strncmp(name, "hw.optional.", 12)) {
+    // the x86 features the translated code stands for: up to SSE3, as the game's build needs
+    const char *f = name + 12;
+    v = !strcmp(f, "mmx") || !strcmp(f, "sse") || !strcmp(f, "sse2") || !strcmp(f, "sse3") || !strcmp(f, "x86_64");
+  } else if (!strcmp(name, "kern.ostype") || !strcmp(name, "kern.osrelease") || !strcmp(name, "hw.machine") ||
+             !strcmp(name, "hw.model")) {
+    // strings: the game sees the kind of Mac it was built for (OS X 10.10 is Darwin 14)
+    const char *t = !strcmp(name, "kern.ostype") ? "Darwin" : !strcmp(name, "kern.osrelease") ? "14.5.0"
+                    : !strcmp(name, "hw.machine") ? "x86_64" : "MacPro6,1";
+    size_t need = strlen(t) + 1;
+    if (old && oldlen) {
+      if (*oldlen < need) { errno = ENOMEM; return -1; }
+      memcpy(old, t, need);
+    }
+    if (oldlen) *oldlen = need;
+    return 0;
+  } else {
     fprintf(stderr, "[dw] sysctlbyname(%s): not known here\n", name);
     errno = ENOENT;
     return -1;
@@ -382,6 +398,7 @@ int dw_sysctl(int *mib, unsigned n, void *old, size_t *oldlen, void *new, size_t
     if (mib[1] == 3) return dw_sysctlbyname("hw.ncpu", old, oldlen, 0, 0);
     if (mib[1] == 24) return dw_sysctlbyname("hw.memsize", old, oldlen, 0, 0);
     if (mib[1] == 7) return dw_sysctlbyname("hw.pagesize", old, oldlen, 0, 0);
+    if (mib[1] == 15) return dw_sysctlbyname("hw.cpufrequency", old, oldlen, 0, 0);
   }
   fprintf(stderr, "[dw] sysctl({%d, %d}): not known here\n", n > 0 ? mib[0] : -1, n > 1 ? mib[1] : -1);
   errno = ENOENT;

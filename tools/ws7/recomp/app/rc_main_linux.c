@@ -46,6 +46,31 @@ static int script_key(const char *name, int *code, int *ch) {
       if (ansi[i] && ansi[i] == name[0]) { *code = i; *ch = name[0]; return 1; }
   return 0;
 }
+// --boot's recorded keys (RS_BOOT_KEYS_FILE, written by --window with RS_KEYS_RECORD): each at its time.
+static void recorded_keys(double ms) {
+  static FILE *f;
+  static int opened, have;
+  static unsigned at;
+  static char what[8];
+  static int code, ch;
+  if (!opened) {
+    opened = 1;
+    const char *p = getenv("RS_BOOT_KEYS_FILE");
+    f = p && *p ? fopen(p, "r") : 0;
+  }
+  while (f) {
+    if (!have && fscanf(f, "%u %7s %d %d", &at, what, &code, &ch) != 4) {
+      fclose(f);
+      f = 0;
+      break;
+    }
+    have = 1;
+    if ((double)at > ms) break;
+    rsp_post_input(what[0] == 'd' ? RSP_EV_KEYDOWN : RSP_EV_KEYUP, code, ch);
+    have = 0;
+  }
+}
+
 static void script_keys(long frame) {
   static const char *keys;
   static int up_code = -1, up_ch;
@@ -134,6 +159,11 @@ int main(int argc, char **argv, char **envp) {
     int have_gl;
     if (window) {
       if (host_window_open(&w, &hgt)) return 1;
+      // RS_RENDER=WIDTHxHEIGHT: the engine draws at that size, in the window's lower left corner, instead
+      // of the window's own (a check for screens of another shape than the game was laid out for).
+      int rw, rh;
+      const char *re = getenv("RS_RENDER");
+      if (re && sscanf(re, "%dx%d", &rw, &rh) == 2 && rw > 0 && rh > 0 && rw <= w && rh <= hgt) w = rw, hgt = rh;
       snprintf(dbuf, sizeof dbuf, "%dx%d", w, hgt);
       setenv("RS_DISPLAY", dbuf, 1);
       have_gl = 1;
@@ -160,8 +190,19 @@ int main(int argc, char **argv, char **envp) {
     const char *shot = getenv("RS_BOOT_SHOT"), *ee = getenv("RS_BOOT_SHOT_EVERY");
     long every = ee && *ee ? atol(ee) : 0;
     rsp_set_focus(1);  // input is only taken while the app has the focus
+    // RS_BOOT_FPS=N holds the loop to N frames a second (a window's pace); 0, the default, runs free.
+    const char *pe = getenv("RS_BOOT_FPS");
+    double fps = pe && *pe ? atof(pe) : 0, loop0 = now_s();
     for (; f < frames; f++) {
       script_keys(f);
+      recorded_keys((now_s() - loop0) * 1000.0);
+      if (fps > 0) {
+        double due = loop0 + (double)(f + 1) / fps, left = due - now_s();
+        if (left > 0) {
+          struct timespec d = {(time_t)left, (long)((left - (double)(time_t)left) * 1e9)};
+          nanosleep(&d, 0);
+        }
+      }
       if (rsp_game_frame()) break;
       if (have_gl && shot && *shot && f == frames - 1) host_gl_save_ppm(shot);
       if (have_gl && shot && *shot && every > 0 && f % every == every - 1) {

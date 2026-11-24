@@ -4,6 +4,10 @@
 // game shares the output with everything else. RS_AUDIO_OUT names an SDL output device.
 // The cable is read from ALSA directly, the card itself (hw), for the smallest delay: it is the one
 // capture device with "Rocksmith" in its name. RS_AUDIO_IN names another ALSA capture device.
+//
+// For checks without a guitar: RS_AUDIO_IN_RECORD=FILE writes what the cable gives (raw 16-bit mono at
+// the capture rate), and RS_AUDIO_IN=file:FILE plays such a file as the cable, at its own pace, then
+// silence.
 #define _GNU_SOURCE
 #include <SDL2/SDL.h>
 #include <alsa/asoundlib.h>
@@ -61,6 +65,11 @@ void host_audio_out_stop(void) {
 // The ALSA device of the cable: "hw:N,0" of the card whose name has "Rocksmith", or RS_AUDIO_IN.
 static int cable_device(char *dev, size_t cap, char *name, size_t ncap) {
   const char *e = getenv("RS_AUDIO_IN");
+  if (e && !strncmp(e, "file:", 5)) {
+    snprintf(dev, cap, "%s", e);
+    if (name) snprintf(name, ncap, "Rocksmith USB Guitar Adapter (a recording)");
+    return 1;
+  }
   if (e && *e) {
     snprintf(dev, cap, "%s", e);
     if (name) snprintf(name, ncap, "%s", e);
@@ -81,7 +90,7 @@ static int cable_device(char *dev, size_t cap, char *name, size_t ncap) {
 }
 
 int host_audio_in_present(char *name, size_t cap) {
-  char dev[64];
+  char dev[1100];
   return cable_device(dev, sizeof dev, name, cap);
 }
 
@@ -92,9 +101,33 @@ static host_audio_capture g_capture;
 static void *g_capture_user;
 static int g_in_frames;
 
+static FILE *g_in_file;  // RS_AUDIO_IN=file:...: the recording played as the cable
+
+// The recording at the capture's pace: a period every period's time, silence after its end.
+static void *file_run(void *arg) {
+  (void)arg;
+  pthread_setname_np(pthread_self(), "rs-cable-file");
+  int16_t raw[4096];
+  float mono[4096];
+  int n = g_in_frames > 4096 ? 4096 : g_in_frames;
+  struct timespec next;
+  clock_gettime(CLOCK_MONOTONIC, &next);
+  while (atomic_load(&g_in_run)) {
+    size_t got = g_in_file ? fread(raw, 2, (size_t)n, g_in_file) : 0;
+    for (int i = 0; i < n; i++) mono[i] = (size_t)i < got ? (float)raw[i] * (1.0f / 32768.0f) : 0.0f;
+    g_capture(g_capture_user, mono, n);
+    next.tv_nsec += (long)(1e9 * n / 48000.0);
+    if (next.tv_nsec >= 1000000000L) { next.tv_nsec -= 1000000000L; next.tv_sec++; }
+    clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, 0);
+  }
+  return 0;
+}
+
 static void *in_run(void *arg) {
   (void)arg;
   pthread_setname_np(pthread_self(), "rs-cable-in");
+  const char *rec = getenv("RS_AUDIO_IN_RECORD");
+  FILE *record = rec && *rec ? fopen(rec, "wb") : 0;
   struct sched_param sp = {.sched_priority = 20};
   pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);  // when the system allows it
   int16_t raw[4096];
@@ -110,15 +143,31 @@ static void *in_run(void *arg) {
       continue;
     }
     for (snd_pcm_sframes_t i = 0; i < got; i++) mono[i] = (float)raw[i] * (1.0f / 32768.0f);
+    if (record && got > 0) fwrite(raw, 2, (size_t)got, record);
     if (got > 0) g_capture(g_capture_user, mono, (int)got);
   }
+  if (record) fclose(record);
   return 0;
 }
 
 int host_audio_in_start(int rate, int frames, host_audio_capture cb, void *user) {
-  if (g_in) return -1;
-  char dev[64], name[128];
+  if (g_in || atomic_load(&g_in_run)) return -1;
+  char dev[1100], name[128];
   if (!cable_device(dev, sizeof dev, name, sizeof name)) return -1;
+  if (!strncmp(dev, "file:", 5)) {
+    g_in_file = fopen(dev + 5, "rb");
+    if (!g_in_file) fprintf(stderr, "[audio] %s: no such recording, the cable is silent\n", dev + 5);
+    g_capture = cb;
+    g_capture_user = user;
+    g_in_frames = frames;
+    atomic_store(&g_in_run, 1);
+    if (pthread_create(&g_in_thread, 0, file_run, 0)) {
+      atomic_store(&g_in_run, 0);
+      return -1;
+    }
+    fprintf(stderr, "[audio] cable: %s, %d frames a period\n", dev, frames);
+    return 0;
+  }
   int err = snd_pcm_open(&g_in, dev, SND_PCM_STREAM_CAPTURE, 0);
   if (err < 0) {
     fprintf(stderr, "[audio] the cable (%s) did not open: %s\n", dev, snd_strerror(err));
@@ -157,6 +206,13 @@ int host_audio_in_start(int rate, int frames, host_audio_capture cb, void *user)
 }
 
 void host_audio_in_stop(void) {
+  if (!g_in && atomic_load(&g_in_run)) {  // a recording
+    atomic_store(&g_in_run, 0);
+    pthread_join(g_in_thread, 0);
+    if (g_in_file) fclose(g_in_file);
+    g_in_file = 0;
+    return;
+  }
   if (!g_in) return;
   atomic_store(&g_in_run, 0);
   snd_pcm_drop(g_in);

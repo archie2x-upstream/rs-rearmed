@@ -60,8 +60,23 @@ static int mac_key(SDL_Keycode k, int *code, int *ch) {
   return 0;
 }
 
+// RS_KEYS_RECORD=FILE: every key sent to the engine, with its time in milliseconds since the loop began,
+// for --boot to play again (RS_BOOT_KEYS_FILE).
+static FILE *g_keys;
+static Uint32 g_t0;
+static void key(int type, int code, int ch) {
+  if (g_keys) {
+    fprintf(g_keys, "%u %s %d %d\n", SDL_GetTicks() - g_t0, type == RSP_EV_KEYDOWN ? "down" : "up", code, ch);
+    fflush(g_keys);
+  }
+  rsp_post_input(type, code, ch);
+}
+
 // The frame loop: events in, a frame, a swap. Returns when the engine or the player ends it.
 void host_window_run(void) {
+  const char *kr = getenv("RS_KEYS_RECORD");
+  g_keys = kr && *kr ? fopen(kr, "w") : 0;
+  g_t0 = SDL_GetTicks();
   rsp_set_focus(1);
   for (;;) {
     SDL_Event e;
@@ -71,10 +86,10 @@ void host_window_run(void) {
         case SDL_QUIT: rsp_request_quit(); break;
         case SDL_KEYDOWN:
           if (e.key.keysym.sym == SDLK_q && (e.key.keysym.mod & KMOD_CTRL)) { rsp_request_quit(); break; }
-          if (mac_key(e.key.keysym.sym, &code, &ch)) rsp_post_input(RSP_EV_KEYDOWN, code, ch);
+          if (mac_key(e.key.keysym.sym, &code, &ch) && !e.key.repeat) key(RSP_EV_KEYDOWN, code, ch);
           break;
         case SDL_KEYUP:
-          if (mac_key(e.key.keysym.sym, &code, &ch)) rsp_post_input(RSP_EV_KEYUP, code, ch);
+          if (mac_key(e.key.keysym.sym, &code, &ch)) key(RSP_EV_KEYUP, code, ch);
           break;
         case SDL_MOUSEMOTION:  // the engine's origin is the bottom left
           rsp_post_input(RSP_EV_MOUSEMOVE, e.motion.x, g_h - 1 - e.motion.y);
