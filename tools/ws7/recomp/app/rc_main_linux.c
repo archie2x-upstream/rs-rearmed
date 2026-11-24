@@ -7,6 +7,8 @@
 //                                        then RS_BOOT_FRAMES engine frames (default 0), drawn to an
 //                                        offscreen OpenGL context of RS_DISPLAY (WIDTHxHEIGHT, default
 //                                        1280x720); RS_BOOT_SHOT=FILE.ppm saves the last frame
+//   rs-rearmed --window GAMEDIR IMAGE    the same start, in a full-screen window with the keyboard and
+//                                        the mouse, until the game ends or Ctrl+Q
 //
 // IMAGE is the decrypted x86-64 Mach-O (RS_RC_IMAGE when it is not given). The imports are bound by the
 // Darwin layer (shims/linux/darwin); RC_LOG_UNRESOLVED lists the ones it has nothing for, and
@@ -31,6 +33,7 @@ static double now_s(void) {
 int main(int argc, char **argv, char **envp) {
   int init_only = 0, bind_only = 0;
   const char *boot_dir = 0;
+  int window = 0;
   const char *img = getenv("RS_RC_IMAGE");
   static char *gargv[64];
   int gargc = 0;
@@ -39,12 +42,13 @@ int main(int argc, char **argv, char **envp) {
     if (!strcmp(argv[i], "--init-only")) init_only = 1;
     else if (!strcmp(argv[i], "--bind-only")) bind_only = 1;
     else if (!strcmp(argv[i], "--boot") && i + 1 < argc) boot_dir = argv[++i];
+    else if (!strcmp(argv[i], "--window") && i + 1 < argc) boot_dir = argv[++i], window = 1;
     else if (argv[i][0] != '-' && (!img || i == argc - 1)) img = argv[i];
     else if (gargc < 63) gargv[gargc++] = argv[i];
   }
   gargv[gargc] = 0;
   if (!img || !*img || !(init_only || bind_only || boot_dir)) {
-    fprintf(stderr, "usage: %s --bind-only|--init-only|--boot GAMEDIR IMAGE\n(there is no shell on this host yet)\n",
+    fprintf(stderr, "usage: %s --bind-only|--init-only|--boot GAMEDIR|--window GAMEDIR IMAGE\n(there is no shell on this host yet)\n",
             argv[0]);
     return 2;
   }
@@ -88,8 +92,16 @@ int main(int argc, char **argv, char **envp) {
     char dbuf[32];
     snprintf(dbuf, sizeof dbuf, "%dx%d", w, hgt);
     setenv("RS_DISPLAY", dbuf, 1);  // the Darwin layer's one display is this size
-    int have_gl = host_gl_offscreen(w, hgt) == 0;
-    if (!have_gl) fprintf(stderr, "[rc] no OpenGL context: the engine starts, but a frame cannot draw\n");
+    int have_gl;
+    if (window) {
+      if (host_window_open(&w, &hgt)) return 1;
+      snprintf(dbuf, sizeof dbuf, "%dx%d", w, hgt);
+      setenv("RS_DISPLAY", dbuf, 1);
+      have_gl = 1;
+    } else {
+      have_gl = host_gl_offscreen(w, hgt) == 0;
+      if (!have_gl) fprintf(stderr, "[rc] no OpenGL context: the engine starts, but a frame cannot draw\n");
+    }
     const rsp_engine_hooks *h = rcapp_seam_hooks();
     rsp_set_hooks(h);
     h->gl_context(h->ctx, NULL);
@@ -98,6 +110,12 @@ int main(int argc, char **argv, char **envp) {
     double t3 = now_s();
     printf("boot: %d initializers in %.3f s, GameBootstrap returned %d after %.3f s\n", n, t2 - t1, r, t3 - t2);
     if (r) return 1;
+    if (window) {
+      rsp_set_display_mode(0, w, hgt);  // the engine draws at the window's size
+      host_window_run();
+      rsp_game_shutdown();
+      return 0;
+    }
     const char *fe = getenv("RS_BOOT_FRAMES");
     long frames = fe && *fe ? atol(fe) : 0, f = 0;
     const char *shot = getenv("RS_BOOT_SHOT");

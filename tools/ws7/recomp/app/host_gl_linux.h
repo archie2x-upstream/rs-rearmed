@@ -9,4 +9,9 @@ void host_gl_swap(void);
 // Write the default framebuffer to a PPM file. 0 on success.
 int host_gl_save_ppm(const char *path);
 
+// A full-screen window with the keyboard and the mouse (host_window_linux.c): open it (the context is
+// then current and *width, *height are its size in pixels; 0 on success), and run the game in it.
+int host_window_open(int *width, int *height);
+void host_window_run(void);
+
 #endif
