@@ -4,6 +4,8 @@
 #   build-ffmpeg.sh <prefix> <arch> [<arch>...]
 #
 # Produces <prefix>/<arch>/{include,lib/libavformat.a,libavcodec.a,libavutil.a}.
+# <arch> is a macOS architecture (arm64, x86_64), or aarch64-linux-gnu for a Linux host: that one is
+# cross-compiled with the C compiler command in RS_LINUX_CC (a clang with its --target and --sysroot).
 # Only what the Bink shim needs is enabled: the bink demuxer, the bink/bink2
 # video decoders and both Bink audio decoders. No protocols: the shim feeds the
 # demuxer through a custom AVIOContext.
@@ -44,10 +46,19 @@ for arch in "$@"; do
     extra+=(--disable-x86asm)   # avoid a nasm dependency; Bink is cheap to decode
   fi
 
+  if [ "$arch" = aarch64-linux-gnu ]; then
+    : "${RS_LINUX_CC:?set RS_LINUX_CC to the cross compiler command for aarch64-linux-gnu}"
+    target=(--arch=aarch64 --target-os=linux --enable-cross-compile --cc="$RS_LINUX_CC" --extra-cflags=-fPIC
+            --ar=llvm-ar --ranlib=llvm-ranlib --nm=llvm-nm --strip=llvm-strip)
+    extra=()
+  else
+    target=(--arch="$arch" --target-os=darwin --cc=clang
+            --extra-cflags="-arch $arch -mmacosx-version-min=11.0 -fPIC"
+            --extra-ldflags="-arch $arch -mmacosx-version-min=11.0")
+  fi
+
   (cd "$src" && ./configure \
-    --prefix="$out" --arch="$arch" --target-os=darwin --cc=clang \
-    --extra-cflags="-arch $arch -mmacosx-version-min=11.0 -fPIC" \
-    --extra-ldflags="-arch $arch -mmacosx-version-min=11.0" \
+    --prefix="$out" "${target[@]}" \
     --enable-static --disable-shared --enable-pic \
     --disable-programs --disable-doc --disable-network --disable-autodetect \
     --disable-everything --disable-avdevice --disable-avfilter \

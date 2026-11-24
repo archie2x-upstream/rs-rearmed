@@ -137,6 +137,8 @@ void *rc_host_symbol(const char *name) {
   if (name[0] == 'g' && name[1] == 'l' && name[2] >= 'A' && name[2] <= 'Z') return gl_symbol(name);
   // Cg: the shader shim linked into the program (shims/cg)
   if (name[0] == 'c' && name[1] == 'g' && name[2] >= 'A' && name[2] <= 'Z') return dlsym(RTLD_DEFAULT, name);
+  // Bink: the video shim linked into the program (shims/bink)
+  if (!strncmp(name, "Bink", 4)) return dlsym(RTLD_DEFAULT, name);
   // Steam: the offline stand-in linked into the program (shims/steam)
   if (!strncmp(name, "Steam", 5)) return dlsym(RTLD_DEFAULT, name);
   if (!strcmp(name, "CGLLockContext") || !strcmp(name, "CGLUnlockContext")) return (void *)dw_cgl_ok;

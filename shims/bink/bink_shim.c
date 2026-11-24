@@ -11,7 +11,11 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#ifdef __APPLE__
 #include <mach/mach_time.h>
+#else
+#include <time.h>
+#endif
 #include <pthread.h>
 #include <sched.h>
 #include <stdarg.h>
@@ -57,9 +61,15 @@ static void set_error(const char *fmt, ...) {
 }
 
 static uint64_t now_ns(void) {
+#ifdef __APPLE__
     static mach_timebase_info_data_t tb;
     if (!tb.denom) mach_timebase_info(&tb);
     return mach_absolute_time() * tb.numer / tb.denom;
+#else
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+#endif
 }
 
 // ---------------------------------------------------------------------------
