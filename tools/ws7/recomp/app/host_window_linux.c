@@ -12,6 +12,8 @@
 
 #include "host_gl_linux.h"
 #include "rsp_platform.h"
+#include "seam.h"
+#include <string.h>
 
 static SDL_Window *g_win;
 static int g_w, g_h;
@@ -63,20 +65,33 @@ static int mac_key(SDL_Keycode k, int *code, int *ch) {
 // RS_KEYS_RECORD=FILE: every key sent to the engine, with its time in milliseconds since the loop began,
 // for --boot to play again (RS_BOOT_KEYS_FILE).
 static FILE *g_keys;
-static Uint32 g_t0;
+static Uint32 g_t0, g_menu_t;  // the loop's start, and when the current menu came up
+static char g_menu[64] = "(none)";
 static void key(int type, int code, int ch) {
   if (g_keys) {
-    fprintf(g_keys, "%u %s %d %d\n", SDL_GetTicks() - g_t0, type == RSP_EV_KEYDOWN ? "down" : "up", code, ch);
+    // time, key, and the menu it was pressed on with the time since that menu came up
+    fprintf(g_keys, "%u %s %d %d %s %u\n", SDL_GetTicks() - g_t0, type == RSP_EV_KEYDOWN ? "down" : "up", code, ch,
+            g_menu, SDL_GetTicks() - g_menu_t);
     fflush(g_keys);
   }
   rsp_post_input(type, code, ch);
+}
+// The current menu, noted when it changes (a line in the log).
+static void watch_menu(void) {
+  const char *m = rcapp_seam_menu_name();
+  if (!m) m = "(none)";
+  if (strcmp(m, g_menu)) {
+    snprintf(g_menu, sizeof g_menu, "%s", m);
+    g_menu_t = SDL_GetTicks();
+    fprintf(stderr, "menu: %s  (%.1f s)\n", g_menu, (g_menu_t - g_t0) / 1000.0);
+  }
 }
 
 // The frame loop: events in, a frame, a swap. Returns when the engine or the player ends it.
 void host_window_run(void) {
   const char *kr = getenv("RS_KEYS_RECORD");
   g_keys = kr && *kr ? fopen(kr, "w") : 0;
-  g_t0 = SDL_GetTicks();
+  g_t0 = g_menu_t = SDL_GetTicks();
   rsp_set_focus(1);
   for (;;) {
     SDL_Event e;
@@ -111,5 +126,7 @@ void host_window_run(void) {
     }
     if (rsp_game_frame()) break;
     SDL_GL_SwapWindow(g_win);
+    static unsigned frame;
+    if (frame++ % 15 == 0) watch_menu();
   }
 }

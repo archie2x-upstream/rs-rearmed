@@ -21,6 +21,28 @@ static EGLContext g_ctx = EGL_NO_CONTEXT;
 static EGLSurface g_surf = EGL_NO_SURFACE;
 static int g_w, g_h;
 
+// RS_GL_DEBUG=1: a debug context, and every message of the driver's that is an error or about
+// undefined behaviour is printed once (by its id), with a count at the 1st, 10th, 100th... time.
+static void GLAPIENTRY gl_message(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length,
+                                  const GLchar *message, const void *user) {
+  (void)source; (void)severity; (void)length; (void)user;
+  if (type != 0x824C /* ERROR */ && type != 0x824E /* UNDEFINED_BEHAVIOR */) return;
+  static struct { GLuint id; unsigned long n; } seen[64];
+  static int count;
+  int i = 0;
+  while (i < count && seen[i].id != id) i++;
+  if (i == count) {
+    if (count == 64) return;
+    seen[count++].id = id;
+  }
+  unsigned long n = ++seen[i].n;
+  if (n == 1 || n == 10 || n == 100 || n == 1000 || n == 10000) fprintf(stderr, "[gl] error (x%lu): %s\n", n, message);
+}
+static int gl_debug_wanted(void) {
+  const char *e = getenv("RS_GL_DEBUG");
+  return e && *e && *e != '0';
+}
+
 static int try_device(EGLDeviceEXT dev, const char *what, int w, int h) {
   EGLDisplay d = eglGetPlatformDisplay(EGL_PLATFORM_DEVICE_EXT, dev, NULL);
   EGLint major, minor;
@@ -32,7 +54,8 @@ static int try_device(EGLDeviceEXT dev, const char *what, int w, int h) {
   EGLConfig cfg;
   EGLint n = 0;
   if (!eglChooseConfig(d, want, &cfg, 1, &n) || n < 1) goto no;
-  const EGLint compat[] = {EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT, EGL_NONE};
+  const EGLint compat[] = {EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT,
+                           gl_debug_wanted() ? EGL_CONTEXT_OPENGL_DEBUG : EGL_NONE, EGL_TRUE, EGL_NONE};
   EGLContext c = eglCreateContext(d, cfg, EGL_NO_CONTEXT, compat);
   if (c == EGL_NO_CONTEXT) c = eglCreateContext(d, cfg, EGL_NO_CONTEXT, NULL);
   if (c == EGL_NO_CONTEXT) goto no;
@@ -51,6 +74,15 @@ static int try_device(EGLDeviceEXT dev, const char *what, int w, int h) {
     eglDestroySurface(d, s);
     eglDestroyContext(d, c);
     goto no;
+  }
+  if (gl_debug_wanted()) {
+    void (*callback)(void (*)(GLenum, GLenum, GLuint, GLenum, GLsizei, const GLchar *, const void *), const void *) =
+        (void (*)(void (*)(GLenum, GLenum, GLuint, GLenum, GLsizei, const GLchar *, const void *), const void *))
+            eglGetProcAddress("glDebugMessageCallback");
+    if (callback) {
+      glEnable(0x92E0 /* GL_DEBUG_OUTPUT */);
+      callback(gl_message, NULL);
+    }
   }
   g_dpy = d;
   g_ctx = c;

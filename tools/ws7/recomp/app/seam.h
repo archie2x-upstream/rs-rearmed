@@ -21,6 +21,9 @@ const rsp_engine_hooks *rcapp_seam_hooks(void);
 // 1 once the translated GameBootstrap has completed successfully.
 int rcapp_seam_booted(void);
 
+// The current menu's name, or NULL (no menu, or not booted). The string is the game's own.
+const char *rcapp_seam_menu_name(void);
+
 // Call the translated function at image address `vmaddr` (unslid) with up to
 // 6+ integer arguments, on the calling thread's guest context and, off the
 // main thread, on a large native stack (translated C functions nest as C

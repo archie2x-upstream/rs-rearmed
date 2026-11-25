@@ -9,7 +9,7 @@
 //                                        1280x720); RS_BOOT_SHOT=FILE.ppm saves the last frame
 //                                        RS_BOOT_SHOT_EVERY=N saves every Nth frame beside it, numbered;
 //                                        RS_BOOT_KEYS="FRAME:KEY ..." presses keys at those frames (KEY:
-//                                        enter esc up down left right space tab back, or one character)
+//                                        enter esc up down left right space tab back del, or one character)
 //   rs-rearmed --window GAMEDIR IMAGE    the same start, in a full-screen window with the keyboard and
 //                                        the mouse, until the game ends or Ctrl+Q
 //
@@ -36,7 +36,7 @@ static double now_s(void) {
 // --boot's scripted keys (RS_BOOT_KEYS): the Mac virtual key code and character the shell would send.
 static int script_key(const char *name, int *code, int *ch) {
   static const struct { const char *n; int code, ch; } named[] = {
-      {"enter", 36, 13}, {"esc", 53, 27}, {"space", 49, 32}, {"tab", 48, 9}, {"back", 51, 127},
+      {"enter", 36, 13}, {"esc", 53, 27}, {"space", 49, 32}, {"tab", 48, 9}, {"back", 51, 127}, {"del", 117, 0xF728},
       {"up", 126, 0xF700}, {"down", 125, 0xF701}, {"left", 123, 0xF702}, {"right", 124, 0xF703}};
   for (size_t i = 0; i < sizeof named / sizeof *named; i++)
     if (!strcmp(named[i].n, name)) { *code = named[i].code; *ch = named[i].ch; return 1; }
@@ -46,26 +46,77 @@ static int script_key(const char *name, int *code, int *ch) {
       if (ansi[i] && ansi[i] == name[0]) { *code = i; *ch = name[0]; return 1; }
   return 0;
 }
-// --boot's recorded keys (RS_BOOT_KEYS_FILE, written by --window with RS_KEYS_RECORD): each at its time.
+// The game's current menu, looked at every frame: its name, when it came up, and how many times the menu
+// has changed. A "menu: NAME" line is logged at each change.
+static char g_menu[64] = "";
+static double g_menu_ms;
+static long g_menu_changes;
+static void watch_menu(long frame, double ms) {
+  const char *m = rcapp_seam_menu_name();
+  if (!m) m = "(none)";
+  if (strcmp(m, g_menu)) {
+    snprintf(g_menu, sizeof g_menu, "%s", m);
+    g_menu_ms = ms;
+    g_menu_changes++;
+    fprintf(stderr, "menu: %s  (frame %ld)\n", g_menu, frame);
+  }
+}
+
+// --boot's recorded keys (RS_BOOT_KEYS_FILE, written by --window with RS_KEYS_RECORD). A line is
+//   TIME down|up CODE CHAR [MENU TIME-ON-MENU]
+// With a menu, the key is sent when the game is on that menu and has been for that long, and, when the
+// recording changed menus since the key before, only after the game has too: the keys follow the game's
+// screens, not the clock. Without one, the key is sent at its time.
 static void recorded_keys(double ms) {
   static FILE *f;
-  static int opened, have;
-  static unsigned at;
-  static char what[8];
+  static int opened, have, fields;
+  static unsigned at, on_menu;
+  static char what[8], menu[64];
   static int code, ch;
+  static double last_start = -1e18;
+  static long changes_at_last = -1;
+  static double waiting_since = -1;
   if (!opened) {
     opened = 1;
     const char *p = getenv("RS_BOOT_KEYS_FILE");
     f = p && *p ? fopen(p, "r") : 0;
   }
   while (f) {
-    if (!have && fscanf(f, "%u %7s %d %d", &at, what, &code, &ch) != 4) {
-      fclose(f);
-      f = 0;
-      break;
+    if (!have) {
+      char line[256];
+      if (!fgets(line, sizeof line, f)) {
+        fclose(f);
+        f = 0;
+        break;
+      }
+      fields = sscanf(line, "%u %7s %d %d %63s %u", &at, what, &code, &ch, menu, &on_menu);
+      if (fields < 4) continue;
+      have = 1;
+      waiting_since = ms;
     }
-    have = 1;
-    if ((double)at > ms) break;
+    static double down_sent_ms;  // when the last key went down here, and in the recording
+    static unsigned down_at;
+    if (fields >= 6 && what[0] == 'u') {
+      // a key comes up as long after it went down as it did then, whatever the menu has become
+      if (ms - down_sent_ms < (double)(at - down_at)) break;
+    } else if (fields >= 6) {
+      double start = (double)at - (double)on_menu;  // when that menu came up in the recording
+      int same_visit = start - last_start < 60 && start - last_start > -60;
+      if (strcmp(menu, g_menu) || ms - g_menu_ms < (double)on_menu || (!same_visit && g_menu_changes <= changes_at_last)) {
+        if (ms - waiting_since > 180000) {
+          fprintf(stderr, "[rc] recorded keys: the game is on %s, not %s, for 3 minutes: stopping the keys\n", g_menu, menu);
+          fclose(f);
+          f = 0;
+        }
+        break;
+      }
+      last_start = start;
+      changes_at_last = g_menu_changes;
+    } else if ((double)at > ms) break;
+    if (what[0] == 'd') {
+      down_sent_ms = ms;
+      down_at = at;
+    }
     rsp_post_input(what[0] == 'd' ? RSP_EV_KEYDOWN : RSP_EV_KEYUP, code, ch);
     have = 0;
   }
@@ -194,6 +245,7 @@ int main(int argc, char **argv, char **envp) {
     const char *pe = getenv("RS_BOOT_FPS");
     double fps = pe && *pe ? atof(pe) : 0, loop0 = now_s();
     for (; f < frames; f++) {
+      watch_menu(f, (now_s() - loop0) * 1000.0);
       script_keys(f);
       recorded_keys((now_s() - loop0) * 1000.0);
       if (fps > 0) {

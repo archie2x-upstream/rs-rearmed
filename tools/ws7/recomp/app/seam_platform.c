@@ -270,6 +270,38 @@ static void h_gl_context(void *ctx, void *glctx) {
   *(uint64_t *)RC_GA(gl_context) = (uint64_t)(uintptr_t)glctx;
 }
 
+// The current menu's name, or NULL when there is none: the UI manager's current menu, and its name's
+// text (an efd string starts with its text's address). For logs and checks, so nothing here is trusted:
+// each step is read through the kernel, which refuses an address that is not mapped, and the name has to
+// be printable.
+#ifdef __APPLE__
+static int peek(uint64_t addr, void *out, size_t n) {
+  memcpy(out, (const void *)(uintptr_t)addr, n);
+  return 1;
+}
+#else
+#include <sys/uio.h>
+static int peek(uint64_t addr, void *out, size_t n) {
+  struct iovec to = {out, n}, from = {(void *)(uintptr_t)addr, n};
+  return process_vm_readv(getpid(), &to, 1, &from, 1, 0) == (ssize_t)n;
+}
+#endif
+const char *rcapp_seam_menu_name(void) {
+  static _Thread_local char name[64];
+  if (!g_booted) return NULL;
+  uint64_t mgr, menu, text;
+  if (!peek(RC_GA(ui_manager), &mgr, 8) || !mgr) return NULL;
+  if (!peek(mgr + RC_OFF(ui_current_menu), &menu, 8) || !menu) return NULL;
+  if (!peek(menu + RC_OFF(menu_name), &text, 8) || !text) return NULL;
+  memset(name, 0, sizeof name);
+  for (size_t i = 0; i < sizeof name - 1; i++) {
+    if (!peek(text + i, &name[i], 1)) return NULL;
+    if (!name[i]) break;
+    if (name[i] < 0x20 || name[i] > 0x7e) return NULL;
+  }
+  return name[0] ? name : NULL;
+}
+
 static const rsp_engine_hooks g_hooks = {
     NULL,           h_bootstrap,     h_frame,        h_input,       h_app_active,
     h_focus_lost,   h_set_resolution, h_set_fullscreen, h_get_fullscreen, h_set_visual_quality,
