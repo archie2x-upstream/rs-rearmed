@@ -1,6 +1,17 @@
 // A first window for the Linux host (rc_main_linux.c --window): the game on the screen, with the
-// keyboard and the mouse. It is the check's window, not the shell yet: no controller, no window modes,
-// no cursor policy.
+// keyboard, the mouse and game controllers. It is the check's window, not the shell yet: no window
+// modes, no cursor policy.
+//
+// A controller plays the keyboard's part, since the game's menus are keyboard menus (buttons by
+// position, as SDL names them on an Xbox pad):
+//   D-pad or left stick   the arrow keys (held: repeats)
+//   A (bottom)            Return: select            B (right)         Esc: back, pause
+//   X (left)              Space: the key the screen names (Help, Tools, ...)
+//   Y (top)               forward Delete: Skip Tuner, delete
+//   Start                 Return                    Back/Select       Tab: sort
+//   L1 / R1               Page Up / Page Down
+//   Capture/Share (misc1) twice within 3 s: quit the game
+// RS_PAD_SWAP=1 swaps A and B, for a pad whose accept button is on the right.
 //
 // SDL makes a full-screen window with a compatibility-profile OpenGL context; the engine draws at the
 // window's size. Keys go to the engine as the Mac shell sends them: a Mac virtual key code and a
@@ -19,7 +30,7 @@ static SDL_Window *g_win;
 static int g_w, g_h;
 
 int host_window_open(int *width, int *height) {
-  if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
+  if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMECONTROLLER)) {
     fprintf(stderr, "[window] SDL: %s\n", SDL_GetError());
     return -1;
   }
@@ -96,6 +107,63 @@ static void watch_menu(void) {
   }
 }
 
+// --- controllers ---------------------------------------------------------------------------------------
+// A button or direction as the key it stands for: (Mac key code, character), 0 when it has none.
+static int pad_key(int button, int *code, int *ch) {
+  static int swap = -1;
+  if (swap < 0) {
+    const char *e = getenv("RS_PAD_SWAP");
+    swap = e && *e == '1';
+  }
+  if (swap && button == SDL_CONTROLLER_BUTTON_A) button = SDL_CONTROLLER_BUTTON_B;
+  else if (swap && button == SDL_CONTROLLER_BUTTON_B) button = SDL_CONTROLLER_BUTTON_A;
+  switch (button) {
+    case SDL_CONTROLLER_BUTTON_A: case SDL_CONTROLLER_BUTTON_START: *code = 36, *ch = 13; return 1;
+    case SDL_CONTROLLER_BUTTON_B: *code = 53, *ch = 27; return 1;
+    case SDL_CONTROLLER_BUTTON_X: *code = 49, *ch = 32; return 1;
+    case SDL_CONTROLLER_BUTTON_Y: *code = 117, *ch = 0xF728; return 1;
+    case SDL_CONTROLLER_BUTTON_BACK: *code = 48, *ch = 9; return 1;
+    case SDL_CONTROLLER_BUTTON_LEFTSHOULDER: *code = 116, *ch = 0xF72C; return 1;
+    case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: *code = 121, *ch = 0xF72D; return 1;
+    case SDL_CONTROLLER_BUTTON_DPAD_UP: *code = 126, *ch = 0xF700; return 1;
+    case SDL_CONTROLLER_BUTTON_DPAD_DOWN: *code = 125, *ch = 0xF701; return 1;
+    case SDL_CONTROLLER_BUTTON_DPAD_LEFT: *code = 123, *ch = 0xF702; return 1;
+    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: *code = 124, *ch = 0xF703; return 1;
+  }
+  return 0;
+}
+// The four directions as held now (D-pad or left stick of any controller), with the keyboard's repeat:
+// a first press, then after 400 ms one every 110 ms.
+static struct { int down; Uint32 next; } g_dir[4];
+static const int dir_button[4] = {SDL_CONTROLLER_BUTTON_DPAD_UP, SDL_CONTROLLER_BUTTON_DPAD_DOWN,
+                                  SDL_CONTROLLER_BUTTON_DPAD_LEFT, SDL_CONTROLLER_BUTTON_DPAD_RIGHT};
+static void pad_directions(void) {
+  int held[4] = {0, 0, 0, 0};
+  for (int i = 0; i < SDL_NumJoysticks(); i++) {
+    SDL_GameController *c = SDL_IsGameController(i) ? SDL_GameControllerFromInstanceID(SDL_JoystickGetDeviceInstanceID(i)) : 0;
+    if (!c) continue;
+    int x = SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_LEFTX), y = SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_LEFTY);
+    held[0] |= SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_DPAD_UP) || y < -20000;
+    held[1] |= SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_DPAD_DOWN) || y > 20000;
+    held[2] |= SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_DPAD_LEFT) || x < -20000;
+    held[3] |= SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_DPAD_RIGHT) || x > 20000;
+  }
+  Uint32 now = SDL_GetTicks();
+  for (int d = 0; d < 4; d++) {
+    int code, ch;
+    pad_key(dir_button[d], &code, &ch);
+    if (held[d] && (!g_dir[d].down || (Sint32)(now - g_dir[d].next) >= 0)) {
+      if (g_dir[d].down) rsp_post_input(RSP_EV_KEYUP, code, ch);
+      rsp_post_input(RSP_EV_KEYDOWN, code, ch);
+      g_dir[d].next = now + (g_dir[d].down ? 110 : 400);
+      g_dir[d].down = 1;
+    } else if (!held[d] && g_dir[d].down) {
+      rsp_post_input(RSP_EV_KEYUP, code, ch);
+      g_dir[d].down = 0;
+    }
+  }
+}
+
 // The frame loop: events in, a frame, a swap. Returns when the engine or the player ends it.
 void host_window_run(void) {
   const char *kr = getenv("RS_KEYS_RECORD");
@@ -120,6 +188,30 @@ void host_window_run(void) {
         case SDL_KEYUP:
           if (mac_key(e.key.keysym.sym, &code, &ch)) key(RSP_EV_KEYUP, code, ch);
           break;
+        case SDL_CONTROLLERDEVICEADDED:
+          if (SDL_GameControllerOpen(e.cdevice.which))
+            fprintf(stderr, "[window] controller: %s\n", SDL_GameControllerNameForIndex(e.cdevice.which));
+          break;
+        case SDL_CONTROLLERDEVICEREMOVED: {
+          SDL_GameController *c = SDL_GameControllerFromInstanceID(e.cdevice.which);
+          if (c) SDL_GameControllerClose(c);
+          break;
+        }
+        case SDL_CONTROLLERBUTTONDOWN:
+        case SDL_CONTROLLERBUTTONUP: {
+          int b = e.cbutton.button, down = e.type == SDL_CONTROLLERBUTTONDOWN;
+          if (b == SDL_CONTROLLER_BUTTON_MISC1) {  // the appliance's quit button: twice within 3 s
+            static Uint32 last;
+            if (down) {
+              if (last && SDL_GetTicks() - last < 3000) rsp_request_quit();
+              last = SDL_GetTicks() ? SDL_GetTicks() : 1;
+            }
+            break;
+          }
+          if (b >= SDL_CONTROLLER_BUTTON_DPAD_UP && b <= SDL_CONTROLLER_BUTTON_DPAD_RIGHT) break;  // pad_directions
+          if (pad_key(b, &code, &ch)) key(down ? RSP_EV_KEYDOWN : RSP_EV_KEYUP, code, ch);
+          break;
+        }
         case SDL_MOUSEMOTION:  // the engine's origin is the bottom left
           rsp_post_input(RSP_EV_MOUSEMOVE, e.motion.x, g_h - 1 - e.motion.y);
           break;
@@ -138,6 +230,7 @@ void host_window_run(void) {
           break;
       }
     }
+    pad_directions();
     if (rsp_game_frame()) break;
     SDL_GL_SwapWindow(g_win);
     static unsigned frame;
