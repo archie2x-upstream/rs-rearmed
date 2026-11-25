@@ -220,3 +220,53 @@ void host_audio_in_stop(void) {
   snd_pcm_close(g_in);
   g_in = 0;
 }
+
+// --- the cable's gain: its capture volume control in the card's mixer --------------------------------
+// Opens the mixer of the cable's card and finds its capture volume; NULL when there is none.
+static snd_mixer_elem_t *gain_control(snd_mixer_t **mixer) {
+  char dev[1100], card[32];
+  int n;
+  *mixer = 0;
+  if (!cable_device(dev, sizeof dev, 0, 0) || sscanf(dev, "hw:%d", &n) != 1) return 0;
+  snprintf(card, sizeof card, "hw:%d", n);
+  if (snd_mixer_open(mixer, 0) < 0) return 0;
+  if (snd_mixer_attach(*mixer, card) < 0 || snd_mixer_selem_register(*mixer, 0, 0) < 0 || snd_mixer_load(*mixer) < 0) {
+    snd_mixer_close(*mixer);
+    *mixer = 0;
+    return 0;
+  }
+  for (snd_mixer_elem_t *e = snd_mixer_first_elem(*mixer); e; e = snd_mixer_elem_next(e))
+    if (snd_mixer_selem_is_active(e) && snd_mixer_selem_has_capture_volume(e)) return e;
+  snd_mixer_close(*mixer);
+  *mixer = 0;
+  return 0;
+}
+
+int host_audio_in_gain_set(float gain) {
+  snd_mixer_t *m;
+  snd_mixer_elem_t *e = gain_control(&m);
+  if (!e) return -1;
+  long lo, hi;
+  snd_mixer_selem_get_capture_volume_range(e, &lo, &hi);
+  if (gain < 0) gain = 0;
+  if (gain > 1) gain = 1;
+  long v = lo + (long)((float)(hi - lo) * gain + 0.5f);
+  int r = snd_mixer_selem_set_capture_volume_all(e, v);
+  if (snd_mixer_selem_has_capture_switch(e)) snd_mixer_selem_set_capture_switch_all(e, 1);
+  long cdb = 0;
+  snd_mixer_selem_get_capture_dB(e, SND_MIXER_SCHN_MONO, &cdb);
+  fprintf(stderr, "[audio] cable gain %.3f: step %ld of %ld..%ld (%.1f dB)\n", gain, v, lo, hi, cdb / 100.0);
+  snd_mixer_close(m);
+  return r < 0 ? -1 : 0;
+}
+
+float host_audio_in_gain_get(void) {
+  snd_mixer_t *m;
+  snd_mixer_elem_t *e = gain_control(&m);
+  if (!e) return -1;
+  long lo, hi, v = 0;
+  snd_mixer_selem_get_capture_volume_range(e, &lo, &hi);
+  snd_mixer_selem_get_capture_volume(e, SND_MIXER_SCHN_MONO, &v);
+  snd_mixer_close(m);
+  return hi > lo ? (float)(v - lo) / (float)(hi - lo) : -1;
+}

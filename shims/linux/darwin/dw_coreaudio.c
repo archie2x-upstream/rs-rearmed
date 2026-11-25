@@ -46,6 +46,8 @@ __attribute__((weak)) void host_audio_out_stop(void);
 __attribute__((weak)) int host_audio_in_present(char *name, size_t cap);
 __attribute__((weak)) int host_audio_in_start(int rate, int frames, host_audio_capture cb, void *user);
 __attribute__((weak)) void host_audio_in_stop(void);
+__attribute__((weak)) int host_audio_in_gain_set(float gain);
+__attribute__((weak)) float host_audio_in_gain_get(void);
 
 struct address { uint32_t selector, scope, element; };
 struct asbd {  // AudioStreamBasicDescription
@@ -178,7 +180,10 @@ static int32_t property(uint32_t obj, const struct address *a, void *out, uint32
       PUT(g_cable_format);
     } else if (sel == FOURCC('v', 'o', 'l', 'm')) {
       if (!input) goto unknown;
+      // the cable's own gain when the host can read it, else what the game last set
       uint32_t bits = atomic_load(&g_in_volume);
+      float real = host_audio_in_gain_get ? host_audio_in_gain_get() : -1;
+      if (real >= 0) memcpy(&bits, &real, 4);
       PUT(bits);
     } else goto unknown;
   } else if (obj == OBJ_IN_STREAM) {
@@ -294,8 +299,11 @@ int32_t dw_AudioObjectSetPropertyData(uint32_t obj, const struct address *a, uin
   }
   if (obj == OBJ_IN_DEVICE && a->selector == FOURCC('v', 'o', 'l', 'm') && size == 4) {
     uint32_t bits;
+    float gain;
     memcpy(&bits, data, 4);
+    memcpy(&gain, data, 4);
     atomic_store(&g_in_volume, bits);
+    if (host_audio_in_gain_set) host_audio_in_gain_set(gain);  // the cable's hardware gain, as on the Mac
     return 0;
   }
   if (obj == OBJ_IN_DEVICE && a->selector == FOURCC('n', 's', 'r', 't') && size == 8) return 0;

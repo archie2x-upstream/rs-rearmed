@@ -21,5 +21,10 @@ typedef void (*host_audio_capture)(void *user, const float *mono, int frames);
 // Start capturing at `rate` Hz in periods of `frames`. 0 on success.
 int host_audio_in_start(int rate, int frames, host_audio_capture cb, void *user);
 void host_audio_in_stop(void);
+// The cable's own input gain, 0 to 1 across the range its hardware control has (the cable's is -8 to
+// +10 dB). The game sets it when it starts the cable and during calibration. Set: 0 on success. Get: the
+// gain, or a negative number when the cable has no such control (or is a recording).
+int host_audio_in_gain_set(float gain);
+float host_audio_in_gain_get(void);
 
 #endif
