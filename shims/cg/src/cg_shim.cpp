@@ -1010,7 +1010,15 @@ CG_EXPORT CGprogram cgCreateProgram(CGcontext handle, CGenum type, const char *t
         p->parsed = false;
         p->parse_error = "object stage does not match profile";
     }
-    if (!p->parsed) logf("program %s will fail to load: %s", program_tag(p).c_str(), p->parse_error.c_str());
+    if (!p->parsed) {
+        logf("program %s will fail to load: %s", program_tag(p).c_str(), p->parse_error.c_str());
+        // what was handed over instead, as far as it is text: the start of it
+        std::string head = object.substr(0, 400);
+        for (char &ch : head)
+            if ((unsigned char)ch < 0x20 && ch != '\n') ch = ' ';
+        logf("  profile %d, entry %s, %zu bytes, starting:\n%s", (int)profile, entry ? entry : "(null)", object.size(),
+             head.c_str());
+    }
     p->slots.assign(4 * std::max(p->arb.uniform_slots, p->arb.max_local + 1), 0.0f);
     p->slot_stamp.assign(p->slots.size() / 4, 0);
     // Constant registers are part of the GLSL uniform array; they go up with the

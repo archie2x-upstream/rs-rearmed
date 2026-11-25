@@ -45,6 +45,15 @@ int host_window_open(int *width, int *height) {
 }
 
 // An SDL key as the Mac shell's (virtual key code, character); 0 when the game has no use for it.
+// The character a key gives with Shift held, on the US layout the key codes below are for.
+static int shifted(int c) {
+  static const char plain[] = "`1234567890-=[]\\;',./", with[] = "~!@#$%^&*()_+{}|:\"<>?";
+  if (c >= 'a' && c <= 'z') return c - 'a' + 'A';
+  for (int i = 0; plain[i]; i++)
+    if (plain[i] == c) return with[i];
+  return c;
+}
+
 static int mac_key(SDL_Keycode k, int *code, int *ch) {
   static const struct { SDL_Keycode k; int code, ch; } map[] = {
       {SDLK_RETURN, 36, 13},   {SDLK_KP_ENTER, 76, 3}, {SDLK_ESCAPE, 53, 27},    {SDLK_SPACE, 49, 32},
@@ -101,7 +110,12 @@ void host_window_run(void) {
         case SDL_QUIT: rsp_request_quit(); break;
         case SDL_KEYDOWN:
           if (e.key.keysym.sym == SDLK_q && (e.key.keysym.mod & KMOD_CTRL)) { rsp_request_quit(); break; }
-          if (mac_key(e.key.keysym.sym, &code, &ch) && !e.key.repeat) key(RSP_EV_KEYDOWN, code, ch);
+          if (mac_key(e.key.keysym.sym, &code, &ch) && !e.key.repeat) {
+            // Shift, or Caps Lock on a letter, gives the upper character, as the Mac shell's key event has it
+            int caps = (e.key.keysym.mod & KMOD_CAPS) && ch >= 'a' && ch <= 'z';
+            if (((e.key.keysym.mod & KMOD_SHIFT) != 0) != caps) ch = shifted(ch);
+            key(RSP_EV_KEYDOWN, code, ch);
+          }
           break;
         case SDL_KEYUP:
           if (mac_key(e.key.keysym.sym, &code, &ch)) key(RSP_EV_KEYUP, code, ch);

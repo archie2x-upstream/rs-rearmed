@@ -10,6 +10,8 @@
 //                                        RS_BOOT_SHOT_EVERY=N saves every Nth frame beside it, numbered;
 //                                        RS_BOOT_KEYS="FRAME:KEY ..." presses keys at those frames (KEY:
 //                                        enter esc up down left right space tab back del, or one character)
+//                                        RS_BOOT_MENU_KEYS="MENU=KEY[,KEY...];..." presses a key when the
+//                                        game comes to that menu (see menu_keys)
 //   rs-rearmed --window GAMEDIR IMAGE    the same start, in a full-screen window with the keyboard and
 //                                        the mouse, until the game ends or Ctrl+Q
 //
@@ -119,6 +121,76 @@ static void recorded_keys(double ms) {
     }
     rsp_post_input(what[0] == 'd' ? RSP_EV_KEYDOWN : RSP_EV_KEYUP, code, ch);
     have = 0;
+  }
+}
+
+// --boot's keys by menu (RS_BOOT_MENU_KEYS): "MENU=KEY[,KEY...];MENU=..." sends a key 2.5 s after that menu
+// comes up, the first KEY the first time, the next the next time, the last from then on ("-" is no key).
+// "(none)" is the screen with no menu, the title among them: its key is sent every 5 s while it lasts.
+// "*" is every menu with no rule of its own.
+static void menu_keys(double ms) {
+  static const char *rules;
+  static long seen_change = -1;
+  static double due = -1, held_until = -1;
+  static int held_code = -1, held_ch;
+  static struct { char menu[64]; int visits; } count[32];
+  static int counted;
+  if (!rules) rules = getenv("RS_BOOT_MENU_KEYS") ? getenv("RS_BOOT_MENU_KEYS") : "";
+  if (!*rules) return;
+  if (held_code >= 0 && ms >= held_until) {
+    rsp_post_input(RSP_EV_KEYUP, held_code, held_ch);
+    held_code = -1;
+  }
+  if (g_menu_changes != seen_change) {
+    seen_change = g_menu_changes;
+    due = ms + 2500;
+    int i = 0;
+    while (i < counted && strcmp(count[i].menu, g_menu)) i++;
+    if (i == counted && counted < 32) snprintf(count[counted++].menu, sizeof count[0].menu, "%s", g_menu);
+    if (i < 32) count[i].visits++;
+  }
+  if (due < 0 || ms < due || held_code >= 0) return;
+  due = !strcmp(g_menu, "(none)") ? ms + 5000 : -1;
+  int visit = 1;
+  for (int i = 0; i < counted; i++)
+    if (!strcmp(count[i].menu, g_menu)) visit = count[i].visits;
+  size_t n = strlen(g_menu);
+  // the menu's own rule, else the rule for "*" (any other menu)
+  const char *own = 0, *any = 0;
+  for (const char *p = rules; *p;) {
+    const char *end = strchr(p, ';');
+    if (!end) end = p + strlen(p);
+    if (!strncmp(p, g_menu, n) && p[n] == '=') own = p;
+    if (p[0] == '*' && p[1] == '=') any = p;
+    p = *end ? end + 1 : end;
+  }
+  if (!own && any) {
+    own = any;
+    n = 1;
+  }
+  for (const char *p = own; p && *p;) {
+    const char *end = strchr(p, ';');
+    if (!end) end = p + strlen(p);
+    {
+      const char *k = p + n + 1;
+      char name[16] = "";
+      for (int v = 1; k < end; v++) {
+        const char *comma = memchr(k, ',', (size_t)(end - k));
+        const char *ke = comma ? comma : end;
+        snprintf(name, sizeof name, "%.*s", (int)(ke - k > 15 ? 15 : ke - k), k);
+        if (v == visit || !comma) break;
+        k = comma + 1;
+      }
+      int code, ch;
+      if (strcmp(name, "-") && script_key(name, &code, &ch)) {
+        fprintf(stderr, "[rc] menu keys: %s on %s (visit %d)\n", name, g_menu, visit);
+        rsp_post_input(RSP_EV_KEYDOWN, code, ch);
+        held_code = code;
+        held_ch = ch;
+        held_until = ms + 100;
+      }
+      return;
+    }
   }
 }
 
@@ -248,6 +320,7 @@ int main(int argc, char **argv, char **envp) {
       watch_menu(f, (now_s() - loop0) * 1000.0);
       script_keys(f);
       recorded_keys((now_s() - loop0) * 1000.0);
+      menu_keys((now_s() - loop0) * 1000.0);
       if (fps > 0) {
         double due = loop0 + (double)(f + 1) / fps, left = due - now_s();
         if (left > 0) {

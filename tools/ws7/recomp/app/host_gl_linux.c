@@ -81,7 +81,9 @@ static int try_device(EGLDeviceEXT dev, const char *what, int w, int h) {
             eglGetProcAddress("glDebugMessageCallback");
     if (callback) {
       glEnable(0x92E0 /* GL_DEBUG_OUTPUT */);
+      glEnable(0x8242 /* GL_DEBUG_OUTPUT_SYNCHRONOUS */);
       callback(gl_message, NULL);
+      glEnable(0xFFFF);  // one deliberate error: its message in the log shows the reporting works
     }
   }
   g_dpy = d;
