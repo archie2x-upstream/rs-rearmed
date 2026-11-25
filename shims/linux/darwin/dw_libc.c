@@ -254,6 +254,47 @@ void rc_host_NSLogv(void *format, void *slots) {
 }
 int rc_host_select(int n, void *r, void *w, void *e, void *timeout) { return select(n, r, w, e, timeout); }
 
+// --- copies that overlap -----------------------------------------------------------------------------
+// Darwin's memcpy is its memmove, and its strcpy and strcat copy byte by byte from the start, so a copy onto
+// an earlier part of the same buffer works there. The game relies on it: it turns ".\\tuner.nif" into
+// "tuner.nif" with a strcpy of the string onto itself. glibc's AArch64 versions copy in blocks and give
+// another result for such a call (the name came out as "tuner.n", and the model was never found). These
+// are the game's forms: memmove, and plain forward loops.
+void *dw_memcpy(void *dst, const void *src, size_t n) { return memmove(dst, src, n); }
+void *dw___memcpy_chk(void *dst, const void *src, size_t n, size_t dstlen) {
+  (void)dstlen;
+  return memmove(dst, src, n);
+}
+char *dw_strcpy(char *dst, const char *src) {
+  char *d = dst;
+  while ((*d++ = *src++)) {}
+  return dst;
+}
+char *dw___strcpy_chk(char *dst, const char *src, size_t dstlen) {
+  (void)dstlen;
+  return dw_strcpy(dst, src);
+}
+char *dw_strncpy(char *dst, const char *src, size_t n) {
+  size_t i = 0;
+  for (; i < n && src[i]; i++) dst[i] = src[i];
+  for (; i < n; i++) dst[i] = 0;
+  return dst;
+}
+char *dw_strcat(char *dst, const char *src) {
+  dw_strcpy(dst + strlen(dst), src);
+  return dst;
+}
+char *dw___strcat_chk(char *dst, const char *src, size_t dstlen) {
+  (void)dstlen;
+  return dw_strcat(dst, src);
+}
+char *dw_strncat(char *dst, const char *src, size_t n) {
+  char *d = dst + strlen(dst);
+  for (; n && *src; n--) *d++ = *src++;
+  *d = 0;
+  return dst;
+}
+
 // --- ctype -------------------------------------------------------------------------------------------
 // <ctype.h>'s inline functions read _DefaultRuneLocale.__runetype[c] for c < 256 and call __maskrune,
 // __tolower and __toupper for the rest. The C locale: only ASCII has a class.

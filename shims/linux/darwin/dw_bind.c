@@ -22,7 +22,9 @@
   X(pthread_key_create) X(pthread_key_delete) X(pthread_getspecific) X(pthread_setspecific)                     \
   X(pthread_setname_np) X(pthread_mach_thread_np) X(pthread_yield_np) X(semaphore_create)                       \
   X(semaphore_destroy) X(semaphore_signal) X(semaphore_wait) X(sem_open) X(sem_close) X(socket)                 \
-  X(gethostbyname) X(getifaddrs) X(freeifaddrs) X(inet_addr) X(inet_ntoa)
+  X(gethostbyname) X(getifaddrs) X(freeifaddrs) X(inet_addr) X(inet_ntoa)                                       \
+  X(pthread_create) X(pthread_join) X(pthread_detach)                                                           \
+  X(memcpy) X(__memcpy_chk) X(strcpy) X(__strcpy_chk) X(strncpy) X(strcat) X(__strcat_chk) X(strncat)
 
 // CoreFoundation (dw_cf.c) and CoreAudio with the AUGraph (dw_coreaudio.c)
 #define DW_APPLE(X)                                                                                            \
@@ -95,10 +97,9 @@ static const char *const same[] = {
     "acos", "acosf", "asin", "asinf", "atan", "atan2", "atan2f", "atanf", "ceil", "ceilf", "cos", "cosf", "cosh",
     "exp", "exp2", "exp2f", "expf", "floor", "floorf", "fmod", "fmodf", "frexp", "ldexp", "log", "log10", "log10f",
     "logf", "modf", "pow", "powf", "sin", "sinf", "sinh", "tan", "tanf", "tanh",
-    "bzero", "memchr", "memcmp", "memcpy", "memmove", "memset", "strcasecmp", "strcat", "strchr", "strcmp", "strcoll",
-    "strcpy", "strcspn", "strdup", "strerror", "strlen", "strncasecmp", "strncat", "strncmp", "strncpy", "strpbrk",
-    "strrchr", "strspn", "strstr", "strtok_r", "__memcpy_chk", "__memmove_chk", "__memset_chk", "__strcat_chk",
-    "__strcpy_chk",
+    "bzero", "memchr", "memcmp", "memmove", "memset", "strcasecmp", "strchr", "strcmp", "strcoll",
+    "strcspn", "strdup", "strerror", "strlen", "strncasecmp", "strncmp", "strpbrk",
+    "strrchr", "strspn", "strstr", "strtok_r", "__memmove_chk", "__memset_chk",
     "abort", "atof", "atoi", "atoll", "calloc", "free", "malloc", "realloc", "qsort", "rand", "srand", "strtod",
     "strtol", "strtoll", "strtoul", "strtoull", "exit", "_Exit", "getenv", "system", "__cxa_atexit",
     "__stack_chk_fail", "__stack_chk_guard", "__udivti3", "__umodti3", "_Unwind_Resume",
@@ -107,8 +108,7 @@ static const char *const same[] = {
     "clock", "difftime", "gmtime", "localtime", "localtime_r", "mktime", "time", "timegm", "strftime",
     "gettimeofday", "usleep", "localeconv", "mbtowc", "wctomb",
     "close", "read", "write", "getcwd", "getegid", "geteuid", "getgid", "getpid", "getuid", "poll",
-    "pthread_attr_destroy", "pthread_condattr_destroy", "pthread_mutexattr_destroy", "pthread_create",
-    "pthread_detach", "pthread_exit", "pthread_join", "pthread_self",
+    "pthread_attr_destroy", "pthread_condattr_destroy", "pthread_mutexattr_destroy", "pthread_exit", "pthread_self",
 };
 
 // --- OpenGL: the host's, by name. The game calls OpenGL 2.1 with the C ABI both systems share. ----------

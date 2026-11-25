@@ -179,6 +179,52 @@ int dw_pthread_setschedparam(pthread_t t, int policy, const int *param) {
 int dw_sched_get_priority_max(int policy) { (void)policy; return 47; }  // Darwin's range, which the game computes within
 int dw_sched_get_priority_min(int policy) { (void)policy; return 15; }
 
+// Threads that can still be joined. Darwin's pthread_join and pthread_detach answer ESRCH for a thread that
+// was already joined or never existed, and the game joins some twice; glibc reads the dead thread's
+// memory instead. So the layer keeps the list and answers as Darwin does.
+#define NTHREADS 512
+static pthread_t live[NTHREADS];
+static int live_used[NTHREADS];
+static pthread_mutex_t live_mu = PTHREAD_MUTEX_INITIALIZER;
+static int live_take(pthread_t t) {  // 1 and forgotten if it was there
+  int found = 0;
+  pthread_mutex_lock(&live_mu);
+  for (int i = 0; i < NTHREADS; i++)
+    if (live_used[i] && pthread_equal(live[i], t)) {
+      live_used[i] = 0;
+      found = 1;
+      break;
+    }
+  pthread_mutex_unlock(&live_mu);
+  return found;
+}
+int dw_pthread_create(pthread_t *out, const pthread_attr_t *attr, void *(*fn)(void *), void *arg) {
+  pthread_t t;
+  int detached = 0;
+  if (attr) pthread_attr_getdetachstate(attr, &detached);
+  // the list is locked across the start, so the new thread cannot be joined before it is in it
+  pthread_mutex_lock(&live_mu);
+  int r = pthread_create(&t, attr, fn, arg);
+  if (!r && detached != PTHREAD_CREATE_DETACHED)
+    for (int i = 0; i < NTHREADS; i++)
+      if (!live_used[i]) {
+        live[i] = t;
+        live_used[i] = 1;
+        break;
+      }
+  pthread_mutex_unlock(&live_mu);
+  if (!r && out) *out = t;
+  return dw_errno_from_host(r);
+}
+int dw_pthread_join(pthread_t t, void **result) {
+  if (!live_take(t)) return DW_ESRCH;
+  return dw_errno_from_host(pthread_join(t, result));
+}
+int dw_pthread_detach(pthread_t t) {
+  if (!live_take(t)) return DW_ESRCH;
+  return dw_errno_from_host(pthread_detach(t));
+}
+
 int dw_pthread_key_create(uint64_t *key, void (*dtor)(void *)) {
   pthread_key_t k;
   int r = pthread_key_create(&k, dtor);
