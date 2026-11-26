@@ -11,6 +11,7 @@
 #define _GNU_SOURCE
 #include <SDL2/SDL.h>
 #include <alsa/asoundlib.h>
+#include <math.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdatomic.h>
@@ -20,6 +21,59 @@
 
 #include "host_audio_linux.h"
 
+// --- the delay from the cable to the output, measured (RS_AUDIO_PROBE=1) --------------------------------
+// The cable's signal is replaced by silence with a 3 ms burst every 2 s. The time the burst is handed to
+// the game is noted, and the output is watched for it: the first output buffer that is loud after a quiet
+// stretch. The gap is what the game and its buffers add between the two calls (not the sound server, the
+// device or the screen after them). It needs a screen where the guitar is heard and nothing else plays.
+static int probe_on(void) {
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("RS_AUDIO_PROBE");
+    v = e && *e == '1';
+  }
+  return v;
+}
+static double probe_now_ms(void) {
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (double)t.tv_sec * 1000.0 + (double)t.tv_nsec / 1e6;
+}
+static _Atomic long long probe_sent_us;  // when the last burst went in, 0 once it has been seen coming out
+static long long probe_frame;           // frames handed to the game so far
+static void probe_input(float *mono, int frames) {
+  for (int i = 0; i < frames; i++, probe_frame++) {
+    long long at = probe_frame % 96000;  // every 2 s at 48 kHz
+    mono[i] = at < 144 ? ((at / 8) % 2 ? 0.8f : -0.8f) : 0.0f;  // 3 ms of a 3 kHz square
+    if (at == 0) atomic_store(&probe_sent_us, (long long)(probe_now_ms() * 1000.0));
+  }
+}
+static void probe_output(const float *stereo, int frames) {
+  static double quiet_since = -1, sum, sum2;
+  static int n;
+  float peak = 0;
+  for (int i = 0; i < frames * 2; i++) {
+    float a = stereo[i] < 0 ? -stereo[i] : stereo[i];
+    if (a > peak) peak = a;
+  }
+  double now = probe_now_ms();
+  if (peak < 0.01f) {
+    if (quiet_since < 0) quiet_since = now;
+    return;
+  }
+  long long sent = atomic_exchange(&probe_sent_us, 0);
+  if (sent && quiet_since >= 0 && now - quiet_since > 300) {
+    double d = now - (double)sent / 1000.0;
+    n++;
+    sum += d;
+    sum2 += d * d;
+    double mean = sum / n, sd = n > 1 ? sqrt((sum2 - n * mean * mean) / (n - 1)) : 0;
+    fprintf(stderr, "[audio] probe: %.1f ms from the cable to the output (peak %.2f; mean %.1f ms, spread %.1f ms, %d bursts)\n",
+            d, peak, mean, sd, n);
+  }
+  quiet_since = -1;
+}
+
 // --- output ----------------------------------------------------------------------------------------
 static SDL_AudioDeviceID g_out;
 static host_audio_render g_render;
@@ -28,6 +82,7 @@ static void *g_render_user;
 static void sdl_fill(void *user, Uint8 *stream, int len) {
   (void)user;
   g_render(g_render_user, (float *)stream, len / (int)(2 * sizeof(float)));
+  if (probe_on()) probe_output((const float *)stream, len / (int)(2 * sizeof(float)));
 }
 
 int host_audio_out_start(int rate, int frames, host_audio_render cb, void *user) {
@@ -115,6 +170,7 @@ static void *file_run(void *arg) {
   while (atomic_load(&g_in_run)) {
     size_t got = g_in_file ? fread(raw, 2, (size_t)n, g_in_file) : 0;
     for (int i = 0; i < n; i++) mono[i] = (size_t)i < got ? (float)raw[i] * (1.0f / 32768.0f) : 0.0f;
+    if (probe_on()) probe_input(mono, n);
     g_capture(g_capture_user, mono, n);
     next.tv_nsec += (long)(1e9 * n / 48000.0);
     if (next.tv_nsec >= 1000000000L) { next.tv_nsec -= 1000000000L; next.tv_sec++; }
@@ -143,6 +199,7 @@ static void *in_run(void *arg) {
       continue;
     }
     for (snd_pcm_sframes_t i = 0; i < got; i++) mono[i] = (float)raw[i] * (1.0f / 32768.0f);
+    if (probe_on() && got > 0) probe_input(mono, (int)got);
     if (record && got > 0) fwrite(raw, 2, (size_t)got, record);
     if (got > 0) g_capture(g_capture_user, mono, (int)got);
   }
